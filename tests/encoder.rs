@@ -73,3 +73,78 @@ fn downloaded_encoders_match_transformers() {
         check(&d);
     }
 }
+
+#[test]
+fn embeddings_endpoint_returns_the_encoders_vectors() {
+    use ferrolm::server::Embedder;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/bert-tiny");
+    let enc = Encoder::load(&dir).unwrap();
+    let texts = [
+        "a short one",
+        "a much longer sentence about retrieval and embeddings",
+        "",
+    ];
+    let want = enc.embed(&Pool::new(2), &texts);
+    let e = Embedder::new("bert-tiny".into(), Encoder::load(&dir).unwrap(), 2);
+
+    let req =
+        json::parse(r#"{"input":["a short one","a much longer sentence about retrieval and embeddings",""]}"#).unwrap();
+    let out = json::parse(&e.respond(&req).unwrap()).unwrap();
+    let data = out.get("data").unwrap().as_arr();
+    assert_eq!(data.len(), 3);
+    for (i, d) in data.iter().enumerate() {
+        assert_eq!(d.get("index").and_then(Json::as_usize), Some(i));
+        let got: Vec<f32> = d
+            .get("embedding")
+            .unwrap()
+            .as_arr()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        assert_eq!(got, want[i], "input {i}");
+    }
+    let tokens: usize = enc.tokenize(&texts).iter().map(Vec::len).sum();
+    assert_eq!(
+        out.get("usage").unwrap().get("prompt_tokens").and_then(Json::as_usize),
+        Some(tokens)
+    );
+
+    // base64: little-endian f32, the same values.
+    let req = json::parse(r#"{"input":"a short one","encoding_format":"base64"}"#).unwrap();
+    let out = json::parse(&e.respond(&req).unwrap()).unwrap();
+    let b64 = out.get("data").unwrap().as_arr()[0]
+        .get("embedding")
+        .and_then(Json::as_str)
+        .unwrap()
+        .to_string();
+    let val = |c: u8| {
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+            .bytes()
+            .position(|x| x == c)
+            .unwrap() as u32
+    };
+    let mut bytes = Vec::new();
+    for q in b64.as_bytes().chunks(4) {
+        let pad = q.iter().filter(|&&c| c == b'=').count();
+        let n = q
+            .iter()
+            .filter(|&&c| c != b'=')
+            .enumerate()
+            .fold(0u32, |n, (k, &c)| n | val(c) << (18 - 6 * k));
+        bytes.extend(&n.to_be_bytes()[1..4 - pad]);
+    }
+    let got: Vec<f32> = bytes
+        .chunks(4)
+        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    assert_eq!(got, want[0]);
+
+    for bad in [
+        r#"{"input":[]}"#,
+        r#"{"input":[1,2]}"#,
+        r#"{}"#,
+        r#"{"input":"x","encoding_format":"int8"}"#,
+    ] {
+        assert!(e.respond(&json::parse(bad).unwrap()).is_err(), "{bad}");
+    }
+}

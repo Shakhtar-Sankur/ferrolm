@@ -1,17 +1,21 @@
 //! An OpenAI-compatible HTTP server over the engine: `/v1/completions` and
-//! `/v1/chat/completions` (with server-sent-event streaming), `/v1/models`,
-//! `/health` and Prometheus `/metrics`. One thread per connection; the
+//! `/v1/chat/completions` (with server-sent-event streaming),
+//! `/v1/embeddings` (when an encoder is loaded), `/v1/models`, `/health`
+//! and Prometheus `/metrics`. One thread per connection; the
 //! engine runs on its own thread and batches whatever the connections
 //! submit.
 
+use crate::encoder::Encoder;
 use crate::engine::{Event, Finish, Handle};
 use crate::json::{self, Json, quote};
+use crate::pool::Pool;
 use crate::sampler::SamplingParams;
 use crate::tokenizer::Tokenizer;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 pub struct Server {
@@ -19,7 +23,129 @@ pub struct Server {
     pub tokenizer: Arc<Tokenizer>,
     pub model_name: String,
     pub started: Instant,
+    pub embedder: Option<Embedder>,
     ids: AtomicU64,
+}
+
+/// An embedding model served at `/v1/embeddings`, with its own threads.
+pub struct Embedder {
+    pub name: String,
+    pub encoder: Encoder,
+    pool: Mutex<Pool>,
+    requests: AtomicU64,
+    inputs: AtomicU64,
+    tokens: AtomicU64,
+    busy: AtomicU32,
+}
+
+/// Most texts in one embeddings request.
+const MAX_INPUTS: usize = 2048;
+/// Texts encoded in one forward pass, to bound activation memory.
+const EMBED_BATCH: usize = 32;
+
+impl Embedder {
+    pub fn new(name: String, encoder: Encoder, threads: usize) -> Embedder {
+        Embedder {
+            name,
+            encoder,
+            pool: Mutex::new(Pool::new(threads)),
+            requests: AtomicU64::new(0),
+            inputs: AtomicU64::new(0),
+            tokens: AtomicU64::new(0),
+            busy: AtomicU32::new(0),
+        }
+    }
+
+    /// The response body for an OpenAI embeddings request, or an error
+    /// message. `input` is a string or an array of strings;
+    /// `encoding_format` is "float" (default) or "base64" (little-endian f32).
+    pub fn respond(&self, req: &Json) -> Result<String, String> {
+        let texts: Vec<&str> = match req.get("input") {
+            Some(Json::Str(s)) => vec![s.as_str()],
+            Some(Json::Arr(a)) if !a.is_empty() => a
+                .iter()
+                .map(|v| v.as_str().ok_or("input must be a string or an array of strings"))
+                .collect::<Result<_, _>>()?,
+            Some(Json::Arr(_)) => return Err("input must not be empty".into()),
+            _ => return Err("input must be a string or an array of strings".into()),
+        };
+        if texts.len() > MAX_INPUTS {
+            return Err(format!("at most {MAX_INPUTS} inputs per request"));
+        }
+        let base64 = match req.get("encoding_format").and_then(Json::as_str) {
+            None | Some("float") => false,
+            Some("base64") => true,
+            Some(f) => return Err(format!("unsupported encoding_format {f:?}")),
+        };
+        let seqs = self.encoder.tokenize(&texts);
+        let tokens: usize = seqs.iter().map(Vec::len).sum();
+        let vecs = self.embed(&seqs);
+        self.requests.fetch_add(1, Ordering::Relaxed);
+        self.inputs.fetch_add(texts.len() as u64, Ordering::Relaxed);
+        self.tokens.fetch_add(tokens as u64, Ordering::Relaxed);
+        let mut data = String::new();
+        for (i, v) in vecs.iter().enumerate() {
+            if i > 0 {
+                data.push(',');
+            }
+            let emb = if base64 {
+                let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+                format!("\"{}\"", base64_encode(&bytes))
+            } else {
+                let mut e = String::from("[");
+                for (j, x) in v.iter().enumerate() {
+                    if j > 0 {
+                        e.push(',');
+                    }
+                    e.push_str(&x.to_string());
+                }
+                e.push(']');
+                e
+            };
+            data.push_str(&format!(r#"{{"object":"embedding","index":{i},"embedding":{emb}}}"#));
+        }
+        Ok(format!(
+            r#"{{"object":"list","data":[{data}],"model":{},"usage":{{"prompt_tokens":{tokens},"total_tokens":{tokens}}}}}"#,
+            quote(&self.name)
+        ))
+    }
+
+    /// Embeddings for tokenized texts, a bounded batch at a time. Texts are
+    /// sorted by length first so each batch holds similar lengths; a text's
+    /// vector does not depend on its batch.
+    pub fn embed(&self, seqs: &[Vec<u32>]) -> Vec<Vec<f32>> {
+        let mut order: Vec<usize> = (0..seqs.len()).collect();
+        order.sort_by_key(|&i| seqs[i].len());
+        let mut out = vec![Vec::new(); seqs.len()];
+        self.busy.fetch_add(1, Ordering::Relaxed);
+        let pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
+        for chunk in order.chunks(EMBED_BATCH) {
+            let batch: Vec<Vec<u32>> = chunk.iter().map(|&i| seqs[i].clone()).collect();
+            for (&i, v) in chunk.iter().zip(self.encoder.embed_tokens(&pool, &batch)) {
+                out[i] = v;
+            }
+        }
+        drop(pool);
+        self.busy.fetch_sub(1, Ordering::Relaxed);
+        out
+    }
+}
+
+fn base64_encode(b: &[u8]) -> String {
+    const A: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut s = String::with_capacity(b.len().div_ceil(3) * 4);
+    for c in b.chunks(3) {
+        let n =
+            (u32::from(c[0]) << 16) | (u32::from(*c.get(1).unwrap_or(&0)) << 8) | u32::from(*c.get(2).unwrap_or(&0));
+        for k in 0..4 {
+            if k <= c.len() {
+                s.push(A[(n >> (18 - 6 * k) & 63) as usize] as char);
+            } else {
+                s.push('=');
+            }
+        }
+    }
+    s
 }
 
 impl Server {
@@ -29,6 +155,7 @@ impl Server {
             tokenizer,
             model_name,
             started: Instant::now(),
+            embedder: None,
             ids: AtomicU64::new(1),
         }
     }
@@ -84,16 +211,41 @@ impl Server {
         match (method.as_str(), path) {
             ("GET", "/health") => respond(&mut conn, 200, "text/plain", "ok\n"),
             ("GET", "/v1/models") => {
-                let body = format!(
-                    r#"{{"object":"list","data":[{{"id":{},"object":"model","created":{},"owned_by":"ferrolm"}}]}}"#,
-                    quote(&self.model_name),
-                    unix_now()
-                );
+                let model = |name: &str| {
+                    format!(
+                        r#"{{"id":{},"object":"model","created":{},"owned_by":"ferrolm"}}"#,
+                        quote(name),
+                        unix_now()
+                    )
+                };
+                let mut data = model(&self.model_name);
+                if let Some(e) = &self.embedder {
+                    data = format!("{data},{}", model(&e.name));
+                }
+                let body = format!(r#"{{"object":"list","data":[{data}]}}"#);
                 respond(&mut conn, 200, "application/json", &body)
             }
             ("GET", "/metrics") => respond(&mut conn, 200, "text/plain; version=0.0.4", &self.metrics()),
             ("POST", "/v1/completions") => self.complete(&mut conn, &body, false),
             ("POST", "/v1/chat/completions") => self.complete(&mut conn, &body, true),
+            ("POST", "/v1/embeddings") => {
+                let Some(e) = &self.embedder else {
+                    return respond(
+                        &mut conn,
+                        404,
+                        "application/json",
+                        &error_json("no embedding model loaded (start with --embedding-model)"),
+                    );
+                };
+                let out = std::str::from_utf8(&body)
+                    .map_err(|_| "body is not UTF-8".to_string())
+                    .and_then(|b| json::parse(b).map_err(|e| format!("invalid JSON: {e}")))
+                    .and_then(|v| e.respond(&v));
+                match out {
+                    Ok(b) => respond(&mut conn, 200, "application/json", &b),
+                    Err(m) => respond(&mut conn, 400, "application/json", &error_json(&m)),
+                }
+            }
             _ => respond(&mut conn, 404, "application/json", &error_json("no such endpoint")),
         }
     }
@@ -384,6 +536,23 @@ impl Server {
             "Seconds since start.",
             format!("{:.0}", self.started.elapsed().as_secs_f64()),
         );
+        if let Some(e) = &self.embedder {
+            let n = |a: &AtomicU64| a.load(Ordering::Relaxed).to_string();
+            put(
+                "embedding_requests_total",
+                "counter",
+                "Embedding requests served.",
+                n(&e.requests),
+            );
+            put("embedding_inputs_total", "counter", "Texts embedded.", n(&e.inputs));
+            put("embedding_tokens_total", "counter", "Tokens embedded.", n(&e.tokens));
+            put(
+                "embedding_requests_running",
+                "gauge",
+                "Embedding requests running or waiting.",
+                e.busy.load(Ordering::Relaxed).to_string(),
+            );
+        }
         m
     }
 }

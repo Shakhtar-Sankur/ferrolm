@@ -1,11 +1,12 @@
 use ferrolm::bench::{self, Workload};
 use ferrolm::config::{Config, RopeScaling};
+use ferrolm::encoder::Encoder;
 use ferrolm::engine::{Admission, Engine, EngineConfig, Event};
 use ferrolm::model::Model;
 use ferrolm::pool::Pool;
 use ferrolm::quant::Quant;
 use ferrolm::sampler::SamplingParams;
-use ferrolm::server::{Detokenizer, Server};
+use ferrolm::server::{Detokenizer, Embedder, Server};
 use ferrolm::tokenizer::Tokenizer;
 use std::io::Write;
 use std::path::Path;
@@ -16,6 +17,7 @@ const USAGE: &str = "ferrolm: an LLM inference server in Rust
 
 USAGE:
   ferrolm serve    --model DIR [--draft DIR] [--host 127.0.0.1] [--port 8000] [engine options]
+                   [--embedding-model DIR [--embedding-threads 2]]
   ferrolm generate --model DIR [--draft DIR] --prompt TEXT [--chat] [--max-tokens 128]
                    [--temperature 0] [--top-p 1] [--top-k 0] [--seed 1] [engine options]
   ferrolm bench    --model DIR|random:SHAPE [--draft DIR|random:SHAPE] [--requests 64]
@@ -211,7 +213,15 @@ fn main() {
                 a.get("--host").unwrap_or("127.0.0.1"),
                 a.num("--port", 8000u16)
             );
-            let server = Arc::new(Server::new(handle, Arc::new(tok), name));
+            let mut server = Server::new(handle, Arc::new(tok), name);
+            if let Some(e) = a.get("--embedding-model") {
+                let enc = Encoder::load(Path::new(e)).unwrap_or_else(|err| die(&format!("{e}: {err}")));
+                let name = Path::new(e)
+                    .file_name()
+                    .map_or(e.to_string(), |n| n.to_string_lossy().into_owned());
+                server.embedder = Some(Embedder::new(name, enc, a.num("--embedding-threads", 2)));
+            }
+            let server = Arc::new(server);
             server.listen(&addr).unwrap_or_else(|e| die(&format!("{addr}: {e}")));
         }
         "generate" => {

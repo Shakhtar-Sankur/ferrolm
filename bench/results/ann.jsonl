@@ -1,0 +1,26 @@
+{"engine":"ferrolm","index":"hnsw","param":"M=16 efC=200 ef=16","recall10":0.80864,"qps_1":9972.9,"qps_n":30544.8,"threads":4,"build_s":157.1,"n":1000000}
+{"engine":"ferrolm","index":"hnsw","param":"M=16 efC=200 ef=32","recall10":0.90964,"qps_1":6579.2,"qps_n":23066.2,"threads":4,"build_s":157.1,"n":1000000}
+{"engine":"ferrolm","index":"hnsw","param":"M=16 efC=200 ef=64","recall10":0.96604,"qps_1":3572.8,"qps_n":15234.3,"threads":4,"build_s":157.1,"n":1000000}
+{"engine":"ferrolm","index":"hnsw","param":"M=16 efC=200 ef=128","recall10":0.98934,"qps_1":1883.7,"qps_n":7526.1,"threads":4,"build_s":157.1,"n":1000000}
+{"engine":"ferrolm","index":"hnsw","param":"M=16 efC=200 ef=256","recall10":0.99615,"qps_1":1040.5,"qps_n":4460.8,"threads":4,"build_s":157.1,"n":1000000}
+{"engine": "faiss", "index": "hnsw", "param": "M=16 efC=200 ef=16", "recall10": 0.80754, "qps_1": 12660.731184223832, "qps_n": 50943.72668740382, "threads": 4, "build_s": 155.27094340324402, "n": 1000000}
+{"engine": "faiss", "index": "hnsw", "param": "M=16 efC=200 ef=32", "recall10": 0.9108, "qps_1": 7142.061205446235, "qps_n": 31854.8363209951, "threads": 4, "build_s": 155.27094340324402, "n": 1000000}
+{"engine": "faiss", "index": "hnsw", "param": "M=16 efC=200 ef=64", "recall10": 0.9674599999999999, "qps_1": 3975.907406178609, "qps_n": 17431.859005849266, "threads": 4, "build_s": 155.27094340324402, "n": 1000000}
+{"engine": "faiss", "index": "hnsw", "param": "M=16 efC=200 ef=128", "recall10": 0.9904, "qps_1": 2256.022212193793, "qps_n": 10124.561216326929, "threads": 4, "build_s": 155.27094340324402, "n": 1000000}
+{"engine": "faiss", "index": "hnsw", "param": "M=16 efC=200 ef=256", "recall10": 0.9973700000000001, "qps_1": 1171.8489424648226, "qps_n": 4995.882923763755, "threads": 4, "build_s": 155.27094340324402, "n": 1000000}
+{"engine":"ferrolm","index":"ivfpq","param":"nlist=1024 m=16 nprobe=1 refine=0","recall10":0.32627,"qps_1":22690.3,"qps_n":75165.8,"threads":4,"build_s":24.6,"n":1000000}
+{"engine":"ferrolm","index":"ivfpq","param":"nlist=1024 m=16 nprobe=4 refine=0","recall10":0.48943,"qps_1":8477.4,"qps_n":30007.4,"threads":4,"build_s":24.6,"n":1000000}
+{"engine":"ferrolm","index":"ivfpq","param":"nlist=1024 m=16 nprobe=16 refine=0","recall10":0.55529,"qps_1":2366.8,"qps_n":9475.9,"threads":4,"build_s":24.6,"n":1000000}
+{"engine":"ferrolm","index":"ivfpq","param":"nlist=1024 m=16 nprobe=64 refine=0","recall10":0.56572,"qps_1":603.7,"qps_n":2539.0,"threads":4,"build_s":24.6,"n":1000000}
+{"engine":"ferrolm","index":"ivfpq","param":"nlist=1024 m=16 nprobe=1 refine=10","recall10":0.39711,"qps_1":12379.9,"qps_n":46205.8,"threads":4,"build_s":24.6,"n":1000000}
+{"engine":"ferrolm","index":"ivfpq","param":"nlist=1024 m=16 nprobe=4 refine=10","recall10":0.70833,"qps_1":6300.6,"qps_n":23214.0,"threads":4,"build_s":24.6,"n":1000000}
+{"engine":"ferrolm","index":"ivfpq","param":"nlist=1024 m=16 nprobe=16 refine=10","recall10":0.91902,"qps_1":2156.9,"qps_n":8055.6,"threads":4,"build_s":24.6,"n":1000000}
+{"engine":"ferrolm","index":"ivfpq","param":"nlist=1024 m=16 nprobe=64 refine=10","recall10":0.97534,"qps_1":590.5,"qps_n":2350.0,"threads":4,"build_s":24.6,"n":1000000}
+{"engine": "faiss", "index": "ivfpq", "param": "nlist=1024 m=16 nprobe=1 refine=0", "recall10": 0.32478, "qps_1": 29620.372593607433, "qps_n": 102663.42592932549, "threads": 4, "build_s": 8.7299964427948, "n": 1000000}
+{"engine": "faiss", "index": "ivfpq", "param": "nlist=1024 m=16 nprobe=4 refine=0", "recall10": 0.48589, "qps_1": 13562.32185383567, "qps_n": 55176.5944011787, "threads": 4, "build_s": 8.7299964427948, "n": 1000000}
+{"engine": "faiss", "index": "ivfpq", "param": "nlist=1024 m=16 nprobe=16 refine=0", "recall10": 0.5513299999999999, "qps_1": 4394.080887552578, "qps_n": 19635.67553953231, "threads": 4, "build_s": 8.7299964427948, "n": 1000000}
+{"engine": "faiss", "index": "ivfpq", "param": "nlist=1024 m=16 nprobe=64 refine=0", "recall10": 0.56265, "qps_1": 1226.0393759870963, "qps_n": 5027.628978284591, "threads": 4, "build_s": 8.7299964427948, "n": 1000000}
+{"engine": "faiss", "index": "ivfpq", "param": "nlist=1024 m=16 nprobe=1 refine=10", "recall10": 0.39752, "qps_1": 16404.826439816174, "qps_n": 40076.401449678335, "threads": 4, "build_s": 8.7299964427948, "n": 1000000}
+{"engine": "faiss", "index": "ivfpq", "param": "nlist=1024 m=16 nprobe=4 refine=10", "recall10": 0.70609, "qps_1": 9164.942810662815, "qps_n": 29120.215282353278, "threads": 4, "build_s": 8.7299964427948, "n": 1000000}
+{"engine": "faiss", "index": "ivfpq", "param": "nlist=1024 m=16 nprobe=16 refine=10", "recall10": 0.9158599999999999, "qps_1": 3686.3701202421894, "qps_n": 15311.937115358358, "threads": 4, "build_s": 8.7299964427948, "n": 1000000}
+{"engine": "faiss", "index": "ivfpq", "param": "nlist=1024 m=16 nprobe=64 refine=10", "recall10": 0.9741400000000001, "qps_1": 1217.8885393351084, "qps_n": 4898.089404789806, "threads": 4, "build_s": 8.7299964427948, "n": 1000000}
