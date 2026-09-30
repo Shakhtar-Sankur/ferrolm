@@ -6,5 +6,7 @@ pub mod kernels;
 pub mod pool;
 pub mod rng;
 pub mod safetensors;
+pub mod tokenizer;
+pub mod unicode;
 pub mod kv;
 pub mod model;
