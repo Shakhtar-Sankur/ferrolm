@@ -40,9 +40,16 @@ pub struct IvfPq {
     codes: Vec<Vec<u8>>,
     vectors: Option<Vec<f32>>,
     count: usize,
+    /// For L2, the query-independent part of each cell's distance table,
+    /// nlist × m × 256: ‖w‖² + 2⟨c_j, w⟩ for centroid c and codeword w, so
+    /// that ‖q − c − w‖² = ‖q − c‖² + that − 2⟨q_j, w⟩ (as FAISS's
+    /// precomputed tables). Empty when it would be too large.
+    pre: Vec<f32>,
 }
 
 const KSUB: usize = 256;
+/// Largest precomputed table, in f32s (256 MB).
+const MAX_PRE: usize = 64 << 20;
 
 impl IvfPq {
     /// Trains the coarse quantizer and codebooks on `sample`.
@@ -93,7 +100,29 @@ impl IvfPq {
             codes: vec![Vec::new(); p.nlist],
             vectors: p.keep_vectors.then(Vec::new),
             count: 0,
+            pre: Vec::new(),
         }
+        .with_tables()
+    }
+
+    fn with_tables(mut self) -> IvfPq {
+        let size = self.nlist * self.m * KSUB;
+        if self.metric != Metric::L2 || size > MAX_PRE {
+            return self;
+        }
+        let mut pre = vec![0f32; size];
+        for (l, t) in pre.chunks_exact_mut(self.m * KSUB).enumerate() {
+            let cen = &self.centroids[l * self.pd..(l + 1) * self.pd];
+            for j in 0..self.m {
+                let cj = &cen[j * self.dsub..(j + 1) * self.dsub];
+                let cb = &self.codebooks[j * KSUB * self.dsub..(j + 1) * KSUB * self.dsub];
+                for (c, w) in cb.chunks_exact(self.dsub).enumerate() {
+                    t[j * KSUB + c] = w.iter().zip(cj).map(|(a, b)| a * a + 2.0 * a * b).sum();
+                }
+            }
+        }
+        self.pre = pre;
+        self
     }
 
     pub fn len(&self) -> usize {
@@ -176,6 +205,10 @@ impl IvfPq {
 
     /// The `nprobe` cells nearest to `q` (padded).
     fn nearest_lists(&self, q: &[f32], nprobe: usize) -> Vec<u32> {
+        self.nearest_cells(q, nprobe).into_iter().map(|n| n.id).collect()
+    }
+
+    fn nearest_cells(&self, q: &[f32], nprobe: usize) -> Vec<Neighbor> {
         let mut top = TopK::new(nprobe);
         for (c, cen) in self.centroids.chunks_exact(self.pd).enumerate() {
             top.push(Neighbor {
@@ -183,7 +216,7 @@ impl IvfPq {
                 distance: self.metric.distance(q, cen),
             });
         }
-        top.into_sorted().into_iter().map(|n| n.id).collect()
+        top.into_sorted()
     }
 
     /// The `k` nearest to `query`, visiting `nprobe` cells. With raw
@@ -191,7 +224,7 @@ impl IvfPq {
     /// re-ranked exactly (`refine` 0 skips it).
     pub fn search(&self, query: &[f32], k: usize, nprobe: usize, refine: usize) -> Vec<Neighbor> {
         let q = pad(query, self.dim);
-        let lists = self.nearest_lists(&q, nprobe.min(self.nlist));
+        let cells = self.nearest_cells(&q, nprobe.min(self.nlist));
         let keep = if refine > 0 && self.vectors.is_some() {
             k * refine
         } else {
@@ -204,10 +237,29 @@ impl IvfPq {
             self.fill_lut(&q, &mut lut);
         }
         let mut rq = vec![0f32; self.pd];
-        for &l in &lists {
-            let l = l as usize;
+        // L2 with precomputed tables: the query's part, −2⟨q_j, w⟩, once.
+        let mut qlut = Vec::new();
+        if self.metric == Metric::L2 && !self.pre.is_empty() {
+            qlut = vec![0f32; self.m * KSUB];
+            for j in 0..self.m {
+                let qj = &q[j * self.dsub..(j + 1) * self.dsub];
+                let cb = &self.codebooks[j * KSUB * self.dsub..(j + 1) * KSUB * self.dsub];
+                for (c, w) in cb.chunks_exact(self.dsub).enumerate() {
+                    qlut[j * KSUB + c] = -2.0 * qj.iter().zip(w).map(|(a, b)| a * b).sum::<f32>();
+                }
+            }
+        }
+        for cell in &cells {
+            let l = cell.id as usize;
             let cen = &self.centroids[l * self.pd..(l + 1) * self.pd];
             let base = match self.metric {
+                Metric::L2 if !qlut.is_empty() => {
+                    let pre = &self.pre[l * self.m * KSUB..(l + 1) * self.m * KSUB];
+                    for ((t, a), b) in lut.iter_mut().zip(pre).zip(&qlut) {
+                        *t = a + b;
+                    }
+                    cell.distance
+                }
                 Metric::L2 => {
                     for ((r, a), b) in rq.iter_mut().zip(&q).zip(cen) {
                         *r = a - b;
@@ -332,6 +384,8 @@ impl IvfPq {
             codes,
             vectors: has.then_some(v),
             count,
-        })
+            pre: Vec::new(),
+        }
+        .with_tables())
     }
 }

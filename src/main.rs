@@ -2,12 +2,15 @@ use ferrolm::bench::{self, Workload};
 use ferrolm::config::{Config, RopeScaling};
 use ferrolm::encoder::Encoder;
 use ferrolm::engine::{Admission, Engine, EngineConfig, Event};
+use ferrolm::json::Json;
 use ferrolm::model::Model;
 use ferrolm::pool::Pool;
 use ferrolm::quant::Quant;
+use ferrolm::rag::{self, IndexKind, Retriever};
 use ferrolm::sampler::SamplingParams;
 use ferrolm::server::{Detokenizer, Embedder, Server};
 use ferrolm::tokenizer::Tokenizer;
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::Path;
 use std::sync::Arc;
@@ -26,6 +29,13 @@ USAGE:
                    [--json FILE] [engine options]
   ferrolm perplexity --model DIR --data FILE [--quant int8|int4] [--awq --calib FILE]
                    [--ctx 512] [--windows 40] [--json FILE]
+  ferrolm ann      --index hnsw|ivfpq --base F --query F --truth F [--learn F] [--json FILE]
+                   (SIFT1M-format vector search benchmark; see bench/ann.sh)
+  ferrolm retrieval --encoder DIR --beir DIR [--qrels FILE] [--index flat|hnsw] [--ef 128]
+                   [--query-prefix TEXT] [--max-tokens 0] [--overlap 0] [--json FILE]
+  ferrolm qa       --model DIR --encoder DIR --data SQUAD.jsonl [--n 200] [--k 3]
+                   [--modes closed,rag,oracle] [--index flat|hnsw] [--query-prefix TEXT]
+                   [--json FILE] [engine options]
   ferrolm info     --model DIR|random:SHAPE
 
 ENGINE OPTIONS:
@@ -73,6 +83,52 @@ impl Args {
             }
         }
     }
+}
+
+fn read_jsonl(path: &Path) -> Vec<Json> {
+    let text = std::fs::read_to_string(path).unwrap_or_else(|e| die(&format!("{}: {e}", path.display())));
+    text.lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| ferrolm::json::parse(l).unwrap_or_else(|e| die(&format!("{}: {e}", path.display()))))
+        .collect()
+}
+
+fn jstr(v: &Json, key: &str) -> String {
+    v.get(key).and_then(Json::as_str).unwrap_or("").to_string()
+}
+
+/// BEIR corpus: ids, and "title text" per document.
+fn read_corpus(path: &Path) -> (Vec<String>, Vec<String>) {
+    read_jsonl(path)
+        .iter()
+        .map(|d| {
+            (
+                jstr(d, "_id"),
+                format!("{} {}", jstr(d, "title"), jstr(d, "text")).trim().to_string(),
+            )
+        })
+        .unzip()
+}
+
+fn index_kind(a: &Args) -> IndexKind {
+    match a.get("--index").unwrap_or("hnsw") {
+        "flat" => IndexKind::Flat,
+        "hnsw" => IndexKind::Hnsw {
+            m: a.num("--m", 16),
+            ef_construction: a.num("--ef-construction", 200),
+            ef: a.num("--ef", 128),
+        },
+        other => die(&format!("unknown index {other:?} (flat or hnsw)")),
+    }
+}
+
+fn append_line(path: &str, line: &str) {
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .unwrap_or_else(|e| die(&format!("{path}: {e}")));
+    writeln!(f, "{line}").ok();
 }
 
 fn die(msg: &str) -> ! {
@@ -510,6 +566,235 @@ fn main() {
                 }
                 other => die(&format!("unknown index {other:?}")),
             }
+        }
+        "retrieval" => {
+            // BEIR-format evaluation: corpus.jsonl, queries.jsonl, qrels TSV.
+            let enc_dir = a.get("--encoder").unwrap_or_else(|| die("--encoder is required"));
+            let beir = Path::new(a.get("--beir").unwrap_or_else(|| die("--beir DIR is required")));
+            let qrels_path = a.get("--qrels").map_or_else(|| beir.join("qrels-test.tsv"), Into::into);
+            let pool = Pool::new(a.num("--threads", ferrolm::pool::cores()));
+            let (ids, docs) = read_corpus(&beir.join("corpus.jsonl"));
+            let queries: HashMap<String, String> = read_jsonl(&beir.join("queries.jsonl"))
+                .iter()
+                .map(|q| (jstr(q, "_id"), jstr(q, "text")))
+                .collect();
+            let mut qrels: HashMap<String, HashMap<String, u32>> = HashMap::new();
+            let qtext =
+                std::fs::read_to_string(&qrels_path).unwrap_or_else(|e| die(&format!("{}: {e}", qrels_path.display())));
+            for line in qtext.lines().skip(1) {
+                let f: Vec<&str> = line.split('\t').collect();
+                if f.len() == 3 {
+                    qrels
+                        .entry(f[0].into())
+                        .or_default()
+                        .insert(f[1].into(), f[2].parse().unwrap_or(0));
+                }
+            }
+            let mut qids: Vec<&String> = qrels.keys().filter(|q| queries.contains_key(*q)).collect();
+            qids.sort();
+            let enc = Encoder::load(Path::new(enc_dir)).unwrap_or_else(|e| die(&format!("{enc_dir}: {e}")));
+            let kind = index_kind(&a);
+            let prefix = a.get("--query-prefix").unwrap_or("");
+            let t = Instant::now();
+            let r = Retriever::build(
+                &pool,
+                enc,
+                &docs,
+                a.num("--max-tokens", 0),
+                a.num("--overlap", 0),
+                kind,
+                prefix,
+            );
+            let build = t.elapsed().as_secs_f64();
+            eprintln!(
+                "ferrolm: {} documents, {} passages, {} tokens embedded in {:.0} s ({:.0} tokens/s); index built in {:.1} s",
+                docs.len(),
+                r.passages.len(),
+                r.embed_tokens,
+                r.embed_seconds,
+                r.embed_tokens as f64 / r.embed_seconds,
+                build - r.embed_seconds
+            );
+            let texts: Vec<&str> = qids.iter().map(|q| queries[*q].as_str()).collect();
+            let t = Instant::now();
+            let qv = r.embed_queries(&pool, &texts);
+            let hits = r.search_docs(&pool, &qv, 101);
+            let qsec = t.elapsed().as_secs_f64();
+            let (mut n10, mut r100) = (0.0, 0.0);
+            for (q, h) in qids.iter().zip(&hits) {
+                // As BEIR does, never count the query's own id as a hit.
+                let ranked: Vec<&str> = h
+                    .iter()
+                    .map(|&(d, _)| ids[d as usize].as_str())
+                    .filter(|d| d != q)
+                    .collect();
+                n10 += rag::ndcg(&ranked, &qrels[*q], 10);
+                r100 += rag::recall_at(&ranked, &qrels[*q], 100);
+            }
+            let nq = qids.len() as f64;
+            let (n10, r100) = (n10 / nq, r100 / nq);
+            let label = a.get("--label").unwrap_or("ferrolm").to_string();
+            println!(
+                "{label}: {} queries, nDCG@10 {n10:.4}, recall@100 {r100:.4}; {:.1} ms per query (embed + search)",
+                qids.len(),
+                1000.0 * qsec / nq
+            );
+            if let Some(f) = a.get("--json") {
+                append_line(
+                    f,
+                    &format!(
+                        r#"{{"label":{},"dataset":{},"queries":{},"ndcg10":{n10:.5},"recall100":{r100:.5},"docs":{},"passages":{},"embed_tokens_per_s":{:.0},"ms_per_query":{:.2}}}"#,
+                        ferrolm::json::quote(&label),
+                        ferrolm::json::quote(&beir.display().to_string()),
+                        qids.len(),
+                        docs.len(),
+                        r.passages.len(),
+                        r.embed_tokens as f64 / r.embed_seconds,
+                        1000.0 * qsec / nq
+                    ),
+                );
+            }
+        }
+        "qa" => {
+            // Question answering with and without retrieval, on SQuAD-format
+            // JSONL ({question, context, answers}): closed book, retrieved
+            // passages from every distinct context, or the gold context.
+            let enc_dir = a.get("--encoder").unwrap_or_else(|| die("--encoder is required"));
+            let data = read_jsonl(Path::new(
+                a.get("--data").unwrap_or_else(|| die("--data FILE is required")),
+            ));
+            let mut contexts: Vec<String> = Vec::new();
+            let mut ctx_id: HashMap<String, u32> = HashMap::new();
+            for d in &data {
+                let c = jstr(d, "context");
+                if !ctx_id.contains_key(&c) {
+                    ctx_id.insert(c.clone(), contexts.len() as u32);
+                    contexts.push(c);
+                }
+            }
+            // A fixed random sample of questions.
+            let n = a.num("--n", 200usize).min(data.len());
+            let mut rng = ferrolm::rng::Rng::new(a.num("--seed", 1));
+            let mut order: Vec<usize> = (0..data.len()).collect();
+            for i in 0..n {
+                let j = i + rng.below((data.len() - i) as u64) as usize;
+                order.swap(i, j);
+            }
+            let sample: Vec<&Json> = order[..n].iter().map(|&i| &data[i]).collect();
+            let k = a.num("--k", 3usize);
+            let pool = Pool::new(a.num("--threads", ferrolm::pool::cores()));
+            let enc = Encoder::load(Path::new(enc_dir)).unwrap_or_else(|e| die(&format!("{enc_dir}: {e}")));
+            let prefix = a.get("--query-prefix").unwrap_or("");
+            let r = Retriever::build(
+                &pool,
+                enc,
+                &contexts,
+                a.num("--max-tokens", 0),
+                a.num("--overlap", 0),
+                index_kind(&a),
+                prefix,
+            );
+            let questions: Vec<String> = sample.iter().map(|d| jstr(d, "question")).collect();
+            let qrefs: Vec<&str> = questions.iter().map(String::as_str).collect();
+            let hits = r.search(&pool, &qrefs, k);
+            drop(pool);
+            let gold: Vec<u32> = sample.iter().map(|d| ctx_id[&jstr(d, "context")]).collect();
+            let found = hits
+                .iter()
+                .zip(&gold)
+                .filter(|(h, g)| h.iter().any(|&(p, _)| r.passages[p as usize].doc == **g))
+                .count();
+            eprintln!(
+                "ferrolm: {} contexts indexed; gold context in the top {k} for {found} of {n} questions",
+                contexts.len()
+            );
+            let dir = a.get("--model").unwrap_or_else(|| die("--model is required"));
+            let tok = Tokenizer::load(Path::new(dir)).unwrap_or_else(|e| die(&format!("tokenizer: {e}")));
+            let (mut engine, handle, _) = build(&a);
+            let worker = std::thread::spawn(move || engine.run());
+            let label = a.get("--label").unwrap_or("ferrolm").to_string();
+            let mut samples = Vec::new();
+            for mode in a.get("--modes").unwrap_or("closed,rag,oracle").split(',') {
+                let prompts: Vec<String> = (0..n)
+                    .map(|i| {
+                        let q = &questions[i];
+                        let passages: Vec<&str> = match mode {
+                            "closed" => Vec::new(),
+                            "rag" => hits[i]
+                                .iter()
+                                .map(|&(p, _)| r.passages[p as usize].text.as_str())
+                                .collect(),
+                            "oracle" => vec![contexts[gold[i] as usize].as_str()],
+                            m => die(&format!("unknown mode {m:?}")),
+                        };
+                        tok.chat_prompt(&[("user".into(), rag::prompt(q, &passages))])
+                    })
+                    .collect();
+                let t = Instant::now();
+                let mut rxs = Vec::new();
+                let mut prompt_tokens = 0;
+                for p in &prompts {
+                    let ids = tok.encode(p, true);
+                    prompt_tokens += ids.len();
+                    let params = SamplingParams {
+                        temperature: 0.0,
+                        top_p: 1.0,
+                        top_k: 0,
+                        seed: 1,
+                        max_tokens: a.num("--max-new-tokens", 32),
+                        stop_ids: tok.stop_ids.clone(),
+                        ignore_eos: false,
+                    };
+                    rxs.push(handle.submit(ids, params).0);
+                }
+                let (mut em, mut f1) = (0.0, 0.0);
+                for (i, rx) in rxs.into_iter().enumerate() {
+                    let mut toks = Vec::new();
+                    for ev in rx {
+                        match ev {
+                            Event::Token(t) => toks.push(t),
+                            Event::Done(_) => break,
+                        }
+                    }
+                    let text = tok.decode(&toks, true);
+                    let answer = text.trim().lines().next().unwrap_or("").trim().to_string();
+                    let golds: Vec<String> = sample[i]
+                        .get("answers")
+                        .map(|v| v.as_arr().iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_default();
+                    let (e, f) = rag::squad_scores(&answer, &golds);
+                    em += e;
+                    f1 += f;
+                    if i < 5 {
+                        samples.push(format!(
+                            "[{mode}] {} -> {answer:?} (gold {:?})",
+                            questions[i],
+                            golds.first()
+                        ));
+                    }
+                }
+                let secs = t.elapsed().as_secs_f64();
+                let (em, f1) = (100.0 * em / n as f64, 100.0 * f1 / n as f64);
+                println!(
+                    "{label} {mode}: exact match {em:.1}, F1 {f1:.1} on {n} questions ({:.0} prompt tokens each, {secs:.0} s)",
+                    prompt_tokens as f64 / n as f64
+                );
+                if let Some(f) = a.get("--json") {
+                    append_line(
+                        f,
+                        &format!(
+                            r#"{{"label":{},"mode":"{mode}","n":{n},"k":{k},"em":{em:.2},"f1":{f1:.2},"retrieval_hits":{found},"prompt_tokens":{:.1},"seconds":{secs:.1}}}"#,
+                            ferrolm::json::quote(&label),
+                            prompt_tokens as f64 / n as f64
+                        ),
+                    );
+                }
+            }
+            for s in samples {
+                eprintln!("{s}");
+            }
+            drop(handle);
+            worker.join().ok();
         }
         "info" => {
             let m = load(

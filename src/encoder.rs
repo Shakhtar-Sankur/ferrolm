@@ -143,6 +143,23 @@ impl Encoder {
         self.embed_tokens(pool, &self.tokenize(texts))
     }
 
+    /// Embeddings for any number of tokenized texts, `batch` texts per
+    /// forward pass (bounding activation memory), sorted by length so each
+    /// pass holds similar lengths. Results are in input order and, as ever,
+    /// independent of batching.
+    pub fn embed_many(&self, pool: &Pool, seqs: &[Vec<u32>], batch: usize) -> Vec<Vec<f32>> {
+        let mut order: Vec<usize> = (0..seqs.len()).collect();
+        order.sort_by_key(|&i| seqs[i].len());
+        let mut out = vec![Vec::new(); seqs.len()];
+        for chunk in order.chunks(batch.max(1)) {
+            let b: Vec<Vec<u32>> = chunk.iter().map(|&i| seqs[i].clone()).collect();
+            for (&i, v) in chunk.iter().zip(self.embed_tokens(pool, &b)) {
+                out[i] = v;
+            }
+        }
+        out
+    }
+
     pub fn embed_tokens(&self, pool: &Pool, seqs: &[Vec<u32>]) -> Vec<Vec<f32>> {
         let d = self.dim;
         let t: usize = seqs.iter().map(Vec::len).sum();
@@ -176,9 +193,7 @@ impl Encoder {
             kernels::add(&mut x, &proj);
             layer_norm_rows(&mut x, &l.ln1.0, &l.ln1.1, self.eps);
             kernels::matmul(pool, &x, t, &l.w1, Some(&l.b1), &mut h1);
-            for v in h1.iter_mut() {
-                *v = gelu(*v);
-            }
+            gelu_rows(pool, &mut h1, self.inter);
             kernels::matmul(pool, &h1, t, &l.w2, Some(&l.b2), &mut proj);
             kernels::add(&mut x, &proj);
             layer_norm_rows(&mut x, &l.ln2.0, &l.ln2.1, self.eps);
@@ -205,39 +220,56 @@ impl Encoder {
             .collect()
     }
 
-    /// Bidirectional attention within each sequence.
+    /// Bidirectional attention within each sequence. A task takes one
+    /// head of one sequence for a block of query rows: it transposes that
+    /// head's keys once, so each query's scores are a few vector
+    /// multiply-adds over all keys at once, and the output is a weighted
+    /// sum of value rows. The order of every sum is fixed, whatever the
+    /// batch.
     fn attention(&self, pool: &Pool, seqs: &[Vec<u32>], starts: &[usize], qkv: &[f32], att: &mut [f32]) {
+        const ROWS: usize = 64;
         let d = self.dim;
         let hd = d / self.heads;
         let scale = 1.0 / (hd as f32).sqrt();
-        let rows: Vec<(usize, usize, usize)> = seqs
-            .iter()
-            .zip(starts)
-            .flat_map(|(s, &st)| (0..s.len()).map(move |i| (st + i, st, s.len())))
-            .collect();
+        // (sequence, head, first query row)
+        let mut tasks = Vec::new();
+        for (i, s) in seqs.iter().enumerate() {
+            for h in 0..self.heads {
+                for r in (0..s.len()).step_by(ROWS) {
+                    tasks.push((i, h, r));
+                }
+            }
+        }
         let out = Out::new(att);
-        pool.run(rows.len() * self.heads, &|task| {
-            let (r, st, len) = rows[task / self.heads];
-            let h = task % self.heads;
-            let q = &qkv[r * 3 * d + h * hd..][..hd];
-            let mut s = Vec::with_capacity(len);
+        pool.run(tasks.len(), &|t| {
+            let (i, h, r0) = tasks[t];
+            let (st, len) = (starts[i], seqs[i].len());
+            let r1 = (r0 + ROWS).min(len);
+            let mut kt = vec![0f32; hd * len];
             for j in 0..len {
                 let k = &qkv[(st + j) * 3 * d + d + h * hd..][..hd];
-                s.push(q.iter().zip(k).map(|(a, b)| a * b).sum::<f32>() * scale);
+                for (c, &v) in k.iter().enumerate() {
+                    kt[c * len + j] = v;
+                }
             }
-            let mx = s.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-            let mut sum = 0f32;
-            for v in &mut s {
-                *v = (*v - mx).exp();
-                sum += *v;
-            }
-            // SAFETY: each task writes its own (row, head) slice.
-            let o = unsafe { out.slice(r * d + h * hd, hd) };
-            o.fill(0.0);
-            for (j, &p) in s.iter().enumerate() {
-                let v = &qkv[(st + j) * 3 * d + 2 * d + h * hd..][..hd];
-                for (a, &b) in o.iter_mut().zip(v) {
-                    *a += p / sum * b;
+            let mut s = vec![0f32; len];
+            for r in r0..r1 {
+                let q = &qkv[(st + r) * 3 * d + h * hd..][..hd];
+                s.fill(0.0);
+                for (c, &qc) in q.iter().enumerate() {
+                    kernels::axpy(&mut s, qc * scale, &kt[c * len..(c + 1) * len]);
+                }
+                let mx = s.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0f32;
+                for v in &mut s {
+                    *v = (*v - mx).exp();
+                    sum += *v;
+                }
+                // SAFETY: each task writes its own rows of its own head.
+                let o = unsafe { out.slice((st + r) * d + h * hd, hd) };
+                o.fill(0.0);
+                for (j, &p) in s.iter().enumerate() {
+                    kernels::axpy(o, p / sum, &qkv[(st + j) * 3 * d + 2 * d + h * hd..][..hd]);
                 }
             }
         });
@@ -256,57 +288,43 @@ fn layer_norm_rows(x: &mut [f32], g: &[f32], b: &[f32], eps: f32) {
     }
 }
 
-/// GELU with the exact error function, as BERT uses.
+/// GELU over rows of width `w`, in parallel.
+fn gelu_rows(pool: &Pool, h: &mut [f32], w: usize) {
+    let rows = h.len() / w;
+    let per = rows.div_ceil(pool.threads() * 4).max(1);
+    let out = Out::new(h);
+    pool.run(rows.div_ceil(per), &|task| {
+        let r0 = task * per;
+        let r1 = (r0 + per).min(rows);
+        // SAFETY: each task owns rows r0..r1.
+        let s = unsafe { out.slice(r0 * w, (r1 - r0) * w) };
+        for v in s {
+            *v = gelu(*v);
+        }
+    });
+}
+
+/// GELU with the error function (not the tanh approximation), as BERT uses.
 fn gelu(x: f32) -> f32 {
     let x = f64::from(x);
     (0.5 * x * (1.0 + erf(x / std::f64::consts::SQRT_2))) as f32
 }
 
-/// erf to about 1e-13: its Taylor series for |x| < 2.5, and a continued
-/// fraction for erfc beyond, where that converges quickly.
+/// erf to within 1e-7 (absolute), below f32 activations' own rounding:
+/// the Chebyshev-fitted erfc of Numerical Recipes (fractional error under
+/// 1.2e-7 for all x), which costs one exp.
 fn erf(x: f64) -> f64 {
-    if x.abs() < 2.5 {
-        let x2 = x * x;
-        let mut term = x;
-        let mut sum = x;
-        for n in 1..120 {
-            term *= -x2 / n as f64;
-            sum += term / (2 * n + 1) as f64;
-        }
-        return sum * 2.0 / std::f64::consts::PI.sqrt();
-    }
-    let sign = x.signum();
-    sign * (1.0 - erfc_pos(x.abs()))
-}
-
-/// erfc for x >= 2.5, by a continued fraction (Lentz's method).
-fn erfc_pos(x: f64) -> f64 {
-    if x > 27.0 {
-        return 0.0;
-    }
-    // erfc(x) = exp(-x²)/sqrt(pi) * 1/(x + 1/2/(x + 1/(x + 3/2/(x + ...))))
-    let tiny = 1e-300;
-    let mut f = x;
-    let mut c = x;
-    let mut d = 0.0;
-    for n in 1..300 {
-        let a = n as f64 / 2.0;
-        d = x + a * d;
-        if d.abs() < tiny {
-            d = tiny;
-        }
-        c = x + a / c;
-        if c.abs() < tiny {
-            c = tiny;
-        }
-        d = 1.0 / d;
-        let delta = c * d;
-        f *= delta;
-        if (delta - 1.0).abs() < 1e-16 {
-            break;
-        }
-    }
-    (-x * x).exp() / std::f64::consts::PI.sqrt() / f
+    let z = x.abs();
+    let t = 1.0 / (1.0 + 0.5 * z);
+    let poly = -1.265_512_23
+        + t * (1.000_023_68
+            + t * (0.374_091_96
+                + t * (0.096_784_18
+                    + t * (-0.186_288_06
+                        + t * (0.278_868_07
+                            + t * (-1.135_203_98 + t * (1.488_515_87 + t * (-0.822_152_23 + t * 0.170_872_77))))))));
+    let erfc = t * (-z * z + poly).exp();
+    if x >= 0.0 { 1.0 - erfc } else { erfc - 1.0 }
 }
 
 #[cfg(test)]
@@ -324,7 +342,7 @@ mod tests {
             (-1.5, -0.966_105_146_475_310_7),
             (4.0, 0.999_999_984_582_742_1),
         ] {
-            assert!((erf(x) - want).abs() < 1e-12, "erf({x}) = {} want {want}", erf(x));
+            assert!((erf(x) - want).abs() < 1.2e-7, "erf({x}) = {} want {want}", erf(x));
         }
     }
 }

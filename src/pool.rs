@@ -64,7 +64,7 @@ impl Pool {
 
     /// One thread per available core.
     pub fn with_all_cores() -> Pool {
-        Pool::new(std::thread::available_parallelism().map_or(1, |n| n.get()))
+        Pool::new(cores())
     }
 
     pub fn threads(&self) -> usize {
@@ -201,6 +201,11 @@ impl<T> Out<T> {
     pub unsafe fn write(&self, i: usize, v: T) {
         unsafe { self.0.add(i).write(v) }
     }
+}
+
+/// The number of cores this process may use.
+pub fn cores() -> usize {
+    std::thread::available_parallelism().map_or(1, |n| n.get())
 }
 
 #[cfg(test)]

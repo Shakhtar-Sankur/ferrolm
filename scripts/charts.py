@@ -143,6 +143,59 @@ def lines(path, title, subtitle, xs, series, xlabel, ylabel, yfmt="{:.0f}", log=
         f.write("\n".join(out))
 
 
+def tradeoff(path, title, subtitle, panels, note):
+    """Small multiples of recall (x) against queries/s (log y): panels is
+    [(panel title, [(series name, [(recall, qps, param)])])], same series
+    order in each so colour follows the engine."""
+    top, bottom, gap, left = 124, 62, 56, 84
+    h = 440
+    pw = (W - left - 24 - gap * (len(panels) - 1)) / len(panels)
+    ph = h - top - bottom
+    out = header(h, title, subtitle)
+    lx = 24
+    for i, (name, _) in enumerate(panels[0][1]):
+        out.append(f'<line x1="{lx}" y1="74" x2="{lx + 18}" y2="74" stroke="{SERIES[i]}" stroke-width="2" stroke-linecap="round"/>')
+        out.append(f'<circle cx="{lx + 9}" cy="74" r="4" fill="{SERIES[i]}" stroke="{SURFACE}" stroke-width="2"/>')
+        out.append(f'<text x="{lx + 26}" y="78" font-size="13" fill="{TEXT}">{esc(name)}</text>')
+        lx += 40 + 7.5 * len(name)
+    for k, (ptitle, series) in enumerate(panels):
+        x0 = left + k * (pw + gap)
+        pts = [p for _, ps in series for p in ps]
+        rlo = math.floor(min(r for r, _, _ in pts) * 10) / 10
+        qlo = 10 ** math.floor(math.log10(min(q for _, q, _ in pts)))
+        qhi = 10 ** math.ceil(math.log10(max(q for _, q, _ in pts)))
+        tx = lambda r: x0 + pw * (r - rlo) / (1 - rlo)
+        ty = lambda q: top + ph * (1 - (math.log10(q) - math.log10(qlo)) / (math.log10(qhi) - math.log10(qlo)))
+        out.append(f'<text x="{x0}" y="{top - 14}" font-size="13" font-weight="600" fill="{TEXT}">{esc(ptitle)}</text>')
+        t = qlo
+        while t <= qhi * 1.001:
+            for m in (1, 2, 5):
+                v = t * m
+                if v > qhi * 1.001:
+                    break
+                y = ty(v)
+                out.append(f'<line x1="{x0}" y1="{y:.1f}" x2="{x0 + pw:.1f}" y2="{y:.1f}" stroke="{GRID}" stroke-width="1"/>')
+                if k == 0 or m == 1:
+                    out.append(f'<text x="{x0 - 6}" y="{y + 4:.1f}" font-size="12" fill="{TEXT2}" text-anchor="end">{v:,.0f}</text>')
+            t *= 10
+        steps = int(round((1 - rlo) / 0.1))
+        for i in range(steps + 1):
+            r = rlo + i * 0.1
+            out.append(f'<text x="{tx(r):.1f}" y="{top + ph + 20}" font-size="12" fill="{TEXT2}" text-anchor="middle">{r:.1f}</text>')
+        out.append(f'<text x="{x0 + pw / 2:.1f}" y="{h - 30}" font-size="12" fill="{TEXT2}" text-anchor="middle">recall@10</text>')
+        for i, (name, ps) in enumerate(series):
+            ps = sorted(ps)
+            line = " ".join(f"{tx(r):.1f},{ty(q):.1f}" for r, q, _ in ps)
+            out.append(f'<polyline points="{line}" fill="none" stroke="{SERIES[i]}" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>')
+            for r, q, param in ps:
+                out.append(f'<circle cx="{tx(r):.1f}" cy="{ty(q):.1f}" r="4" fill="{SERIES[i]}" stroke="{SURFACE}" stroke-width="2"><title>{esc(name)}, {esc(param)}: recall {r:.4f}, {q:,.0f} queries/s</title></circle>')
+    out.append(f'<text x="16" y="{top + ph / 2}" font-size="12" fill="{TEXT2}" text-anchor="middle" transform="rotate(-90 16 {top + ph / 2})">queries/s, 1 thread (log)</text>')
+    out.append(f'<text x="24" y="{h - 10}" font-size="12" fill="{TEXT2}">{esc(note)}</text>')
+    out.append("</svg>")
+    with open(path, "w") as f:
+        f.write("\n".join(out))
+
+
 def main():
     os.makedirs("docs", exist_ok=True)
     note = "SmolLM2-360M-Instruct, bf16 weights; 4 vCPUs (Xeon, AVX-512). Replies of fixed length."
@@ -195,6 +248,38 @@ def main():
         fmt="{:.1f}",
         note="Greedy decoding: the text is identical with and without the draft. k = tokens proposed per step.",
     )
+
+    ann = load("ann.jsonl")
+
+    def curve(engine, index, keep=lambda p: True):
+        return [(r["recall10"], r["qps_1"], r["param"]) for r in ann
+                if r["engine"] == engine and r["index"] == index and keep(r["param"])]
+
+    refined = lambda p: p.endswith("refine=10")
+    tradeoff(
+        "docs/ann.svg",
+        "Vector search on SIFT1M: ferrolm against FAISS",
+        "1M 128-d vectors; HNSW M=16, efC=200; IVF-PQ 1,024 lists, 16-byte codes, top 100 re-ranked",
+        [
+            ("HNSW, ef 16 to 256", [("ferrolm", curve("ferrolm", "hnsw")), ("FAISS 1.15", curve("faiss", "hnsw"))]),
+            ("IVF-PQ with re-ranking, nprobe 1 to 64", [
+                ("ferrolm", curve("ferrolm", "ivfpq", refined)), ("FAISS 1.15", curve("faiss", "ivfpq", refined))]),
+        ],
+        "Up and to the right is better. One thread of a 4-vCPU Xeon (AVX-512); 2,000 of the 10,000 queries timed.",
+    )
+    if os.path.exists("bench/results/qa.jsonl"):
+        qa = {r["mode"]: r for r in load("qa.jsonl")}
+        names = {"closed": "No retrieval", "rag": "Retrieved passages", "oracle": "Gold passage"}
+        n = next(iter(qa.values()))
+        bars(
+            "docs/rag.svg",
+            "Question answering with and without retrieval",
+            f"SQuAD v1.1 dev, {n['n']} questions; F1 of the model's short answers",
+            [(names[m], qa[m]["f1"], m == "rag") for m in ("closed", "rag", "oracle") if m in qa],
+            "F1",
+            fmt="{:.1f}",
+            note=f"SmolLM2-1.7B-Instruct answers; bge-small retrieves the top {n['k']} of every distinct dev paragraph (HNSW).",
+        )
 
 
 if __name__ == "__main__":

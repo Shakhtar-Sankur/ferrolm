@@ -12,6 +12,7 @@ pub mod kv;
 pub mod model;
 pub mod pool;
 pub mod quant;
+pub mod rag;
 pub mod rng;
 pub mod safetensors;
 pub mod sampler;

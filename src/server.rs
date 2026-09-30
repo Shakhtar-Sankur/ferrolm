@@ -110,21 +110,11 @@ impl Embedder {
         ))
     }
 
-    /// Embeddings for tokenized texts, a bounded batch at a time. Texts are
-    /// sorted by length first so each batch holds similar lengths; a text's
-    /// vector does not depend on its batch.
+    /// Embeddings for tokenized texts, a bounded batch at a time.
     pub fn embed(&self, seqs: &[Vec<u32>]) -> Vec<Vec<f32>> {
-        let mut order: Vec<usize> = (0..seqs.len()).collect();
-        order.sort_by_key(|&i| seqs[i].len());
-        let mut out = vec![Vec::new(); seqs.len()];
         self.busy.fetch_add(1, Ordering::Relaxed);
         let pool = self.pool.lock().unwrap_or_else(|e| e.into_inner());
-        for chunk in order.chunks(EMBED_BATCH) {
-            let batch: Vec<Vec<u32>> = chunk.iter().map(|&i| seqs[i].clone()).collect();
-            for (&i, v) in chunk.iter().zip(self.encoder.embed_tokens(&pool, &batch)) {
-                out[i] = v;
-            }
-        }
+        let out = self.encoder.embed_many(&pool, seqs, EMBED_BATCH);
         drop(pool);
         self.busy.fetch_sub(1, Ordering::Relaxed);
         out

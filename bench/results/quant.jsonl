@@ -1,0 +1,4 @@
+{"model":"models/smollm2-360m","format":"bf16","ppl":19.9276,"tokens":10220,"weight_mb":723.5}
+{"model":"models/smollm2-360m","format":"int8","ppl":19.9221,"tokens":10220,"weight_mb":448.3}
+{"model":"models/smollm2-360m","format":"int4","ppl":23.6148,"tokens":10220,"weight_mb":291.0}
+{"model":"models/smollm2-360m","format":"int4+awq","ppl":21.7766,"tokens":10220,"weight_mb":291.0}

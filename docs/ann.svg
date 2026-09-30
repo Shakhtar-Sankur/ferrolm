@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="440" viewBox="0 0 720 440" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="Vector search on SIFT1M: ferrolm against FAISS">
+<rect width="720" height="440" rx="8" fill="#fcfcfb"/>
+<text x="24" y="34" font-size="17" font-weight="600" fill="#0b0b0b">Vector search on SIFT1M: ferrolm against FAISS</text>
+<text x="24" y="56" font-size="13" fill="#52514e">1M 128-d vectors; HNSW M=16, efC=200; IVF-PQ 1,024 lists, 16-byte codes, top 100 re-ranked</text>
+<line x1="24" y1="74" x2="42" y2="74" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/>
+<circle cx="33" cy="74" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<text x="50" y="78" font-size="13" fill="#0b0b0b">ferrolm</text>
+<line x1="116.5" y1="74" x2="134.5" y2="74" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<circle cx="125.5" cy="74" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<text x="142.5" y="78" font-size="13" fill="#0b0b0b">FAISS 1.15</text>
+<text x="84.0" y="110" font-size="13" font-weight="600" fill="#0b0b0b">HNSW, ef 16 to 256</text>
+<line x1="84.0" y1="378.0" x2="362.0" y2="378.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="78.0" y="382.0" font-size="12" fill="#52514e" text-anchor="end">1,000</text>
+<line x1="84.0" y1="339.8" x2="362.0" y2="339.8" stroke="#e4e3df" stroke-width="1"/>
+<text x="78.0" y="343.8" font-size="12" fill="#52514e" text-anchor="end">2,000</text>
+<line x1="84.0" y1="289.2" x2="362.0" y2="289.2" stroke="#e4e3df" stroke-width="1"/>
+<text x="78.0" y="293.2" font-size="12" fill="#52514e" text-anchor="end">5,000</text>
+<line x1="84.0" y1="251.0" x2="362.0" y2="251.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="78.0" y="255.0" font-size="12" fill="#52514e" text-anchor="end">10,000</text>
+<line x1="84.0" y1="212.8" x2="362.0" y2="212.8" stroke="#e4e3df" stroke-width="1"/>
+<text x="78.0" y="216.8" font-size="12" fill="#52514e" text-anchor="end">20,000</text>
+<line x1="84.0" y1="162.2" x2="362.0" y2="162.2" stroke="#e4e3df" stroke-width="1"/>
+<text x="78.0" y="166.2" font-size="12" fill="#52514e" text-anchor="end">50,000</text>
+<line x1="84.0" y1="124.0" x2="362.0" y2="124.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="78.0" y="128.0" font-size="12" fill="#52514e" text-anchor="end">100,000</text>
+<text x="84.0" y="398" font-size="12" fill="#52514e" text-anchor="middle">0.8</text>
+<text x="223.0" y="398" font-size="12" fill="#52514e" text-anchor="middle">0.9</text>
+<text x="362.0" y="398" font-size="12" fill="#52514e" text-anchor="middle">1.0</text>
+<text x="223.0" y="410" font-size="12" fill="#52514e" text-anchor="middle">recall@10</text>
+<polyline points="96.0,251.1 236.4,274.1 314.8,307.8 347.2,343.1 356.6,375.8" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="96.0" cy="251.1" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>ferrolm, M=16 efC=200 ef=16: recall 0.8086, 9,973 queries/s</title></circle>
+<circle cx="236.4" cy="274.1" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>ferrolm, M=16 efC=200 ef=32: recall 0.9096, 6,579 queries/s</title></circle>
+<circle cx="314.8" cy="307.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>ferrolm, M=16 efC=200 ef=64: recall 0.9660, 3,573 queries/s</title></circle>
+<circle cx="347.2" cy="343.1" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>ferrolm, M=16 efC=200 ef=128: recall 0.9893, 1,884 queries/s</title></circle>
+<circle cx="356.6" cy="375.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>ferrolm, M=16 efC=200 ef=256: recall 0.9961, 1,040 queries/s</title></circle>
+<polyline points="94.5,238.0 238.0,269.6 316.8,301.9 348.7,333.1 358.3,369.3" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="94.5" cy="238.0" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>FAISS 1.15, M=16 efC=200 ef=16: recall 0.8075, 12,661 queries/s</title></circle>
+<circle cx="238.0" cy="269.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>FAISS 1.15, M=16 efC=200 ef=32: recall 0.9108, 7,142 queries/s</title></circle>
+<circle cx="316.8" cy="301.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>FAISS 1.15, M=16 efC=200 ef=64: recall 0.9675, 3,976 queries/s</title></circle>
+<circle cx="348.7" cy="333.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>FAISS 1.15, M=16 efC=200 ef=128: recall 0.9904, 2,256 queries/s</title></circle>
+<circle cx="358.3" cy="369.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>FAISS 1.15, M=16 efC=200 ef=256: recall 0.9974, 1,172 queries/s</title></circle>
+<text x="418.0" y="110" font-size="13" font-weight="600" fill="#0b0b0b">IVF-PQ with re-ranking, nprobe 1 to 64</text>
+<line x1="418.0" y1="378.0" x2="696.0" y2="378.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="412.0" y="382.0" font-size="12" fill="#52514e" text-anchor="end">100</text>
+<line x1="418.0" y1="352.5" x2="696.0" y2="352.5" stroke="#e4e3df" stroke-width="1"/>
+<line x1="418.0" y1="318.8" x2="696.0" y2="318.8" stroke="#e4e3df" stroke-width="1"/>
+<line x1="418.0" y1="293.3" x2="696.0" y2="293.3" stroke="#e4e3df" stroke-width="1"/>
+<text x="412.0" y="297.3" font-size="12" fill="#52514e" text-anchor="end">1,000</text>
+<line x1="418.0" y1="267.8" x2="696.0" y2="267.8" stroke="#e4e3df" stroke-width="1"/>
+<line x1="418.0" y1="234.2" x2="696.0" y2="234.2" stroke="#e4e3df" stroke-width="1"/>
+<line x1="418.0" y1="208.7" x2="696.0" y2="208.7" stroke="#e4e3df" stroke-width="1"/>
+<text x="412.0" y="212.7" font-size="12" fill="#52514e" text-anchor="end">10,000</text>
+<line x1="418.0" y1="183.2" x2="696.0" y2="183.2" stroke="#e4e3df" stroke-width="1"/>
+<line x1="418.0" y1="149.5" x2="696.0" y2="149.5" stroke="#e4e3df" stroke-width="1"/>
+<line x1="418.0" y1="124.0" x2="696.0" y2="124.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="412.0" y="128.0" font-size="12" fill="#52514e" text-anchor="end">100,000</text>
+<text x="418.0" y="398" font-size="12" fill="#52514e" text-anchor="middle">0.3</text>
+<text x="457.7" y="398" font-size="12" fill="#52514e" text-anchor="middle">0.4</text>
+<text x="497.4" y="398" font-size="12" fill="#52514e" text-anchor="middle">0.5</text>
+<text x="537.1" y="398" font-size="12" fill="#52514e" text-anchor="middle">0.6</text>
+<text x="576.9" y="398" font-size="12" fill="#52514e" text-anchor="middle">0.7</text>
+<text x="616.6" y="398" font-size="12" fill="#52514e" text-anchor="middle">0.8</text>
+<text x="656.3" y="398" font-size="12" fill="#52514e" text-anchor="middle">0.9</text>
+<text x="696.0" y="398" font-size="12" fill="#52514e" text-anchor="middle">1.0</text>
+<text x="557.0" y="410" font-size="12" fill="#52514e" text-anchor="middle">recall@10</text>
+<polyline points="456.6,200.8 580.2,225.7 663.8,265.1 686.2,312.7" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="456.6" cy="200.8" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>ferrolm, nlist=1024 m=16 nprobe=1 refine=10: recall 0.3971, 12,380 queries/s</title></circle>
+<circle cx="580.2" cy="225.7" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>ferrolm, nlist=1024 m=16 nprobe=4 refine=10: recall 0.7083, 6,301 queries/s</title></circle>
+<circle cx="663.8" cy="265.1" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>ferrolm, nlist=1024 m=16 nprobe=16 refine=10: recall 0.9190, 2,157 queries/s</title></circle>
+<circle cx="686.2" cy="312.7" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>ferrolm, nlist=1024 m=16 nprobe=64 refine=10: recall 0.9753, 590 queries/s</title></circle>
+<polyline points="456.7,190.5 579.3,211.9 662.6,245.4 685.7,286.1" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="456.7" cy="190.5" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>FAISS 1.15, nlist=1024 m=16 nprobe=1 refine=10: recall 0.3975, 16,405 queries/s</title></circle>
+<circle cx="579.3" cy="211.9" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>FAISS 1.15, nlist=1024 m=16 nprobe=4 refine=10: recall 0.7061, 9,165 queries/s</title></circle>
+<circle cx="662.6" cy="245.4" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>FAISS 1.15, nlist=1024 m=16 nprobe=16 refine=10: recall 0.9159, 3,686 queries/s</title></circle>
+<circle cx="685.7" cy="286.1" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>FAISS 1.15, nlist=1024 m=16 nprobe=64 refine=10: recall 0.9741, 1,218 queries/s</title></circle>
+<text x="16" y="251.0" font-size="12" fill="#52514e" text-anchor="middle" transform="rotate(-90 16 251.0)">queries/s, 1 thread (log)</text>
+<text x="24" y="430" font-size="12" fill="#52514e">Up and to the right is better. One thread of a 4-vCPU Xeon (AVX-512); 2,000 of the 10,000 queries timed.</text>
+</svg>
