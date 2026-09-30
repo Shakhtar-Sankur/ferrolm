@@ -65,15 +65,9 @@ impl Config {
         }
         let hidden = int("hidden_size")?;
         let heads = int("num_attention_heads")?;
-        let kv_heads = v
-            .get("num_key_value_heads")
-            .and_then(Json::as_usize)
-            .unwrap_or(heads);
-        let head_dim = v
-            .get("head_dim")
-            .and_then(Json::as_usize)
-            .unwrap_or(hidden / heads);
-        if heads % kv_heads != 0 || head_dim % 16 != 0 || hidden % 16 != 0 {
+        let kv_heads = v.get("num_key_value_heads").and_then(Json::as_usize).unwrap_or(heads);
+        let head_dim = v.get("head_dim").and_then(Json::as_usize).unwrap_or(hidden / heads);
+        if heads % kv_heads != 0 || !head_dim.is_multiple_of(16) || !hidden.is_multiple_of(16) {
             return Err(format!(
                 "unsupported shape: {heads} heads, {kv_heads} kv heads, head_dim {head_dim}, hidden {hidden}"
             ));
@@ -132,12 +126,8 @@ impl Config {
                 .get("max_position_embeddings")
                 .and_then(Json::as_usize)
                 .unwrap_or(4096),
-            tie_embeddings: v
-                .get("tie_word_embeddings")
-                .and_then(Json::as_bool)
-                .unwrap_or(false),
-            qkv_bias: arch == "qwen2"
-                || v.get("attention_bias").and_then(Json::as_bool) == Some(true),
+            tie_embeddings: v.get("tie_word_embeddings").and_then(Json::as_bool).unwrap_or(false),
+            qkv_bias: arch == "qwen2" || v.get("attention_bias").and_then(Json::as_bool) == Some(true),
             eos: ids("eos_token_id"),
             bos: ids("bos_token_id").first().copied(),
             arch,
@@ -173,7 +163,10 @@ mod tests {
         )
         .unwrap();
         let c = Config::parse(&v).unwrap();
-        assert_eq!((c.rope_theta, c.rope_scaling.clone(), c.qkv_bias), (1e6, RopeScaling::None, true));
+        assert_eq!(
+            (c.rope_theta, c.rope_scaling.clone(), c.qkv_bias),
+            (1e6, RopeScaling::None, true)
+        );
     }
 
     #[test]

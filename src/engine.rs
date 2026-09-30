@@ -128,9 +128,16 @@ impl Handle {
     pub fn submit(&self, prompt: Vec<u32>, params: SamplingParams) -> (Receiver<Event>, Arc<AtomicBool>) {
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
-        let req = Request { prompt, params, events: tx, cancel: Arc::clone(&cancel) };
+        let req = Request {
+            prompt,
+            params,
+            events: tx,
+            cancel: Arc::clone(&cancel),
+        };
         if let Err(e) = self.tx.send(req) {
-            e.0.events.send(Event::Done(Finish::Rejected("engine stopped".into()))).ok();
+            e.0.events
+                .send(Event::Done(Finish::Rejected("engine stopped".into())))
+                .ok();
         }
         (rx, cancel)
     }
@@ -200,7 +207,10 @@ impl Engine {
         });
         let max_len = c.max_position.min(cfg.kv_blocks * cfg.block_size);
         let (tx, rx) = mpsc::channel();
-        let stats = Arc::new(Mutex::new(Stats { kv_total_blocks: cfg.kv_blocks, ..Stats::default() }));
+        let stats = Arc::new(Mutex::new(Stats {
+            kv_total_blocks: cfg.kv_blocks,
+            ..Stats::default()
+        }));
         let e = Engine {
             model,
             draft,
@@ -270,7 +280,11 @@ impl Engine {
             return;
         }
         if let Some(bad) = req.prompt.iter().find(|&&t| t as usize >= self.model.cfg.vocab) {
-            req.events.send(Event::Done(Finish::Rejected(format!("token {bad} is outside the vocabulary")))).ok();
+            req.events
+                .send(Event::Done(Finish::Rejected(format!(
+                    "token {bad} is outside the vocabulary"
+                ))))
+                .ok();
             self.local.finished += 1;
             return;
         }
@@ -396,7 +410,12 @@ impl Engine {
             let target = s.computed + n;
             let draft = if spec { s.tokens.len() + k - 1 } else { 0 };
             if self.grow(i, target.max(self.reserve_for(i)), draft) {
-                plans.push(Plan { seq: i, n, drafts: Vec::new(), draft_dists: Vec::new() });
+                plans.push(Plan {
+                    seq: i,
+                    n,
+                    drafts: Vec::new(),
+                    draft_dists: Vec::new(),
+                });
                 budget -= n;
                 i += 1;
                 continue;
@@ -440,7 +459,11 @@ impl Engine {
             };
             let need = want.div_ceil(bs).saturating_sub(s.blocks.len());
             // Keep a little headroom so running sequences can grow.
-            let headroom = if self.running.is_empty() { 0 } else { (self.blocks.total() / 100).max(1) };
+            let headroom = if self.running.is_empty() {
+                0
+            } else {
+                (self.blocks.total() / 100).max(1)
+            };
             if self.blocks.available() < need + headroom {
                 let mut s = self.waiting.pop_front().unwrap();
                 self.release(&mut s);
@@ -454,7 +477,12 @@ impl Engine {
             let ok = self.grow(i, want, 0);
             debug_assert!(ok);
             if n > 0 {
-                plans.push(Plan { seq: i, n, drafts: Vec::new(), draft_dists: Vec::new() });
+                plans.push(Plan {
+                    seq: i,
+                    n,
+                    drafts: Vec::new(),
+                    draft_dists: Vec::new(),
+                });
                 budget -= n;
             }
         }
@@ -463,7 +491,9 @@ impl Engine {
 
     /// Token slots reserved for a running sequence under `reserve_tokens`.
     fn reserve_for(&self, i: usize) -> usize {
-        self.cfg.reserve_tokens.map_or(0, |r| r.min(self.max_len).max(self.running[i].tokens.len()))
+        self.cfg
+            .reserve_tokens
+            .map_or(0, |r| r.min(self.max_len).max(self.running[i].tokens.len()))
     }
 
     fn execute(&mut self, mut plans: Vec<Plan>) {
@@ -523,7 +553,11 @@ impl Engine {
                 Logits::None => s.computed += p.n,
                 Logits::Last => {
                     s.computed += p.n;
-                    new.push(sampler::sample(&logits[row * vocab..(row + 1) * vocab], &s.req.params, &mut s.rng));
+                    new.push(sampler::sample(
+                        &logits[row * vocab..(row + 1) * vocab],
+                        &s.req.params,
+                        &mut s.rng,
+                    ));
                     row += 1;
                 }
                 Logits::All => {
@@ -552,7 +586,11 @@ impl Engine {
                                     .enumerate()
                                     .filter_map(|(t, (&a, &b))| (a > b).then_some((t as u32, a - b)))
                                     .collect();
-                                Some(if resid.is_empty() { sampler::draw(&dense_pairs(&pd), &mut s.rng) } else { sampler::draw(&resid, &mut s.rng) })
+                                Some(if resid.is_empty() {
+                                    sampler::draw(&dense_pairs(&pd), &mut s.rng)
+                                } else {
+                                    sampler::draw(&resid, &mut s.rng)
+                                })
                             }
                         };
                         match take {
@@ -602,7 +640,9 @@ impl Engine {
             while s.keys.len() < s.computed.min(s.tokens.len()) / bs {
                 let i = s.keys.len();
                 let parent = s.keys.last().copied().unwrap_or(ROOT);
-                let key = self.blocks.publish(s.blocks[i], parent, &s.tokens[i * bs..(i + 1) * bs]);
+                let key = self
+                    .blocks
+                    .publish(s.blocks[i], parent, &s.tokens[i * bs..(i + 1) * bs]);
                 s.keys.push(key);
             }
         }
@@ -636,8 +676,17 @@ impl Engine {
                 .zip(&inputs)
                 .map(|(&p, t)| {
                     let s = &self.running[plans[p].seq];
-                    let pos = if round == 0 { s.draft_computed } else { s.tokens.len() + round - 1 };
-                    Chunk { tokens: t, pos, blocks: &s.draft_blocks, logits: Logits::Last }
+                    let pos = if round == 0 {
+                        s.draft_computed
+                    } else {
+                        s.tokens.len() + round - 1
+                    };
+                    Chunk {
+                        tokens: t,
+                        pos,
+                        blocks: &s.draft_blocks,
+                        logits: Logits::Last,
+                    }
                 })
                 .collect();
             let logits = d.model.forward(&self.pool, &mut d.cache, &chunks);
@@ -677,7 +726,11 @@ fn dense(pairs: &[(u32, f32)], vocab: usize) -> Vec<f32> {
 }
 
 fn dense_pairs(v: &[f32]) -> Vec<(u32, f32)> {
-    v.iter().enumerate().filter(|e| *e.1 > 0.0).map(|(t, &p)| (t as u32, p)).collect()
+    v.iter()
+        .enumerate()
+        .filter(|e| *e.1 > 0.0)
+        .map(|(t, &p)| (t as u32, p))
+        .collect()
 }
 
 /// Collects a request's events into its generated tokens and finish reason.

@@ -1,0 +1,56 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --check
+      - run: cargo clippy --release --all-targets -- -D warnings
+      - run: cargo test --release
+      - name: the portable kernels give the same results
+        run: FERROLM_ISA=portable cargo test --release --test reference --test engine
+
+  real-models:
+    name: real models against Hugging Face transformers
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: pip install torch --index-url https://download.pytorch.org/whl/cpu && pip install transformers tokenizers safetensors
+      - uses: actions/cache@v4
+        with:
+          path: models
+          key: models-v1
+      - name: download models
+        run: |
+          [ -f models/smollm2-135m/model.safetensors ] || scripts/fetch_model.sh HuggingFaceTB/SmolLM2-135M-Instruct models/smollm2-135m
+          [ -f models/smollm2-360m/model.safetensors ] || scripts/fetch_model.sh HuggingFaceTB/SmolLM2-360M-Instruct models/smollm2-360m
+          [ -f models/qwen2.5-0.5b/model.safetensors ] || scripts/fetch_model.sh Qwen/Qwen2.5-0.5B-Instruct models/qwen2.5-0.5b
+      - run: python scripts/reference_real.py models/smollm2-135m models/smollm2-360m models/qwen2.5-0.5b
+      - name: logits, greedy text, tokenizers and chat templates match
+        run: |
+          FERROLM_REAL_MODELS=models/smollm2-135m,models/smollm2-360m,models/qwen2.5-0.5b \
+            cargo test --release --test reference --test tokenizer -- --nocapture downloaded | tee -a "$GITHUB_STEP_SUMMARY"
+      - name: answer a question through the server
+        run: |
+          cargo build --release
+          ./target/release/ferrolm serve --model models/smollm2-360m --kv-mem 256M --port 8000 &
+          for i in $(seq 60); do curl -sf localhost:8000/health && break; sleep 1; done
+          curl -sf localhost:8000/v1/chat/completions -H 'Content-Type: application/json' \
+            -d '{"messages":[{"role":"user","content":"What is the capital of France?"}],"temperature":0,"max_tokens":20}' | tee answer.json
+          grep -q Paris answer.json

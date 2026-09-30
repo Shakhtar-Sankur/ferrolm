@@ -64,10 +64,7 @@ impl Json {
 }
 
 pub fn parse(s: &str) -> Result<Json, String> {
-    let mut p = Parser {
-        b: s.as_bytes(),
-        i: 0,
-    };
+    let mut p = Parser { b: s.as_bytes(), i: 0 };
     let v = p.value()?;
     p.ws();
     if p.i != p.b.len() {
@@ -154,11 +151,7 @@ impl Parser<'_> {
             }
             Some(_) => {
                 let start = self.i;
-                while self.i < self.b.len()
-                    && matches!(
-                        self.b[self.i],
-                        b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9'
-                    )
+                while self.i < self.b.len() && matches!(self.b[self.i], b'-' | b'+' | b'.' | b'e' | b'E' | b'0'..=b'9')
                 {
                     self.i += 1;
                 }
@@ -191,17 +184,13 @@ impl Parser<'_> {
                         b'b' => out.push('\u{8}'),
                         b'f' => out.push('\u{c}'),
                         b'u' => {
-                            let hex = std::str::from_utf8(
-                                self.b.get(self.i..self.i + 4).ok_or("bad \\u")?,
-                            )
-                            .map_err(|_| "bad \\u")?;
+                            let hex = std::str::from_utf8(self.b.get(self.i..self.i + 4).ok_or("bad \\u")?)
+                                .map_err(|_| "bad \\u")?;
                             let mut code = u32::from_str_radix(hex, 16).map_err(|_| "bad \\u")?;
                             self.i += 4;
                             // A high surrogate followed by an escaped low one is
                             // a single character outside the BMP.
-                            if (0xD800..0xDC00).contains(&code)
-                                && self.b.get(self.i..self.i + 2) == Some(b"\\u")
-                            {
+                            if (0xD800..0xDC00).contains(&code) && self.b.get(self.i..self.i + 2) == Some(b"\\u") {
                                 let low = std::str::from_utf8(&self.b[self.i + 2..])
                                     .ok()
                                     .and_then(|t| t.get(..4))
@@ -219,13 +208,10 @@ impl Parser<'_> {
                 _ => {
                     // Copy a run of plain UTF-8 bytes.
                     let start = self.i - 1;
-                    while self.i < self.b.len() && self.b[self.i] != b'"' && self.b[self.i] != b'\\'
-                    {
+                    while self.i < self.b.len() && self.b[self.i] != b'"' && self.b[self.i] != b'\\' {
                         self.i += 1;
                     }
-                    out.push_str(
-                        std::str::from_utf8(&self.b[start..self.i]).map_err(|_| "invalid UTF-8")?,
-                    );
+                    out.push_str(std::str::from_utf8(&self.b[start..self.i]).map_err(|_| "invalid UTF-8")?);
                 }
             }
         }
@@ -254,8 +240,10 @@ mod tests {
 
     #[test]
     fn parses_nested_values() {
-        let v = parse(r#"{"header":{"revision":"2"},"kvs":[{"key":"Zm9v","value":"YmFy"}],"count":"1","ok":true,"n":-1.5e2}"#)
-            .unwrap();
+        let v = parse(
+            r#"{"header":{"revision":"2"},"kvs":[{"key":"Zm9v","value":"YmFy"}],"count":"1","ok":true,"n":-1.5e2}"#,
+        )
+        .unwrap();
         let kv = &v.get("kvs").unwrap().as_arr()[0];
         assert_eq!(kv.get("value").and_then(Json::as_str), Some("YmFy"));
         assert_eq!(v.get("ok").and_then(Json::as_bool), Some(true));

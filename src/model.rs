@@ -179,7 +179,11 @@ impl Model {
                     && l.w_gate_up.rows == 2 * c.intermediate
                     && l.w_down.cols == c.intermediate
             });
-        if ok { Ok(()) } else { Err("weight shapes do not match config.json".into()) }
+        if ok {
+            Ok(())
+        } else {
+            Err("weight shapes do not match config.json".into())
+        }
     }
 
     fn lm_head(&self) -> &Matrix {
@@ -228,7 +232,9 @@ impl Model {
         let mut act = vec![0f32; t * c.intermediate];
 
         for (li, l) in self.layers.iter().enumerate() {
-            par_rows(pool, t, &x, &mut xn, |a, b| kernels::rms_norm(a, &l.attn_norm, c.rms_eps, b));
+            par_rows(pool, t, &x, &mut xn, |a, b| {
+                kernels::rms_norm(a, &l.attn_norm, c.rms_eps, b)
+            });
             kernels::matmul(pool, &xn, t, &l.wqkv, l.bqkv.as_deref(), &mut qkv);
             for r in 0..t {
                 let row = &mut qkv[r * qkv_dim..(r + 1) * qkv_dim];
@@ -241,7 +247,9 @@ impl Model {
             self.attention(pool, cache, li, chunks, &pos, &owner, &qkv, &mut att);
             kernels::matmul(pool, &att, t, &l.wo, None, &mut proj);
             kernels::add(&mut x, &proj);
-            par_rows(pool, t, &x, &mut xn, |a, b| kernels::rms_norm(a, &l.mlp_norm, c.rms_eps, b));
+            par_rows(pool, t, &x, &mut xn, |a, b| {
+                kernels::rms_norm(a, &l.mlp_norm, c.rms_eps, b)
+            });
             kernels::matmul(pool, &xn, t, &l.w_gate_up, None, &mut gate_up);
             let inter = c.intermediate;
             par_rows(pool, t, &gate_up, &mut act, |a, b| kernels::silu_mul(a, inter, b));
@@ -263,7 +271,12 @@ impl Model {
         }
         let mut hsel = vec![0f32; rows.len() * h];
         for (i, &r) in rows.iter().enumerate() {
-            kernels::rms_norm(&x[r * h..(r + 1) * h], &self.norm, c.rms_eps, &mut hsel[i * h..(i + 1) * h]);
+            kernels::rms_norm(
+                &x[r * h..(r + 1) * h],
+                &self.norm,
+                c.rms_eps,
+                &mut hsel[i * h..(i + 1) * h],
+            );
         }
         let mut logits = vec![0f32; rows.len() * c.vocab];
         kernels::matmul(pool, &hsel, rows.len(), self.lm_head(), None, &mut logits);

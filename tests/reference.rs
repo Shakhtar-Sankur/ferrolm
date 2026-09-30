@@ -7,11 +7,18 @@ use ferrolm::model::{Chunk, Logits, Model};
 use ferrolm::pool::Pool;
 use std::path::Path;
 
-fn fixture(name: &str) -> (Model, Json) {
-    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
-    let model = Model::load(&dir).unwrap();
-    let r = json::parse(&std::fs::read_to_string(dir.join("reference.json")).unwrap()).unwrap();
+fn load(dir: &Path, reference: &str) -> (Model, Json) {
+    let model = Model::load(dir).unwrap();
+    let r = json::parse(&std::fs::read_to_string(dir.join(reference)).unwrap()).unwrap();
     (model, r)
+}
+
+/// Downloaded models to check too (comma-separated directories prepared
+/// by scripts/reference_real.py).
+pub fn real_models() -> Vec<std::path::PathBuf> {
+    std::env::var("FERROLM_REAL_MODELS")
+        .map(|v| v.split(',').filter(|s| !s.is_empty()).map(Into::into).collect())
+        .unwrap_or_default()
 }
 
 fn ids(v: &Json) -> Vec<u32> {
@@ -42,8 +49,16 @@ fn argmax(v: &[f32]) -> u32 {
 }
 
 fn check(name: &str) {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures").join(name);
+    check_dir(&dir, "reference.json", 1e-3);
+}
+
+/// Logits within `tol` of transformers' (relative to the largest logit),
+/// and the same greedy continuation.
+fn check_dir(dir: &Path, reference: &str, tol: f64) {
+    let name = dir.display().to_string();
     let pool = Pool::new(4);
-    let (m, r) = fixture(name);
+    let (m, r) = load(dir, reference);
     let prompt = ids(r.get("prompt").unwrap());
     let greedy = ids(r.get("greedy").unwrap());
     let vocab = m.cfg.vocab;
@@ -52,18 +67,28 @@ fn check(name: &str) {
     let logits = m.forward(
         &pool,
         &mut cache,
-        &[Chunk { tokens: &prompt, pos: 0, blocks: &table, logits: Logits::All }],
+        &[Chunk {
+            tokens: &prompt,
+            pos: 0,
+            blocks: &table,
+            logits: Logits::All,
+        }],
     );
     let rows = ids(r.get("logits_rows").unwrap());
-    let mut worst = 0f64;
+    let (mut worst, mut scale) = (0f64, 1f64);
     for (row, expect) in rows.iter().zip(r.get("logits").unwrap().as_arr()) {
         let got = &logits[*row as usize * vocab..][..vocab];
         for (g, e) in got.iter().zip(expect.as_arr()) {
-            worst = worst.max((f64::from(*g) - e.as_f64().unwrap()).abs());
+            let e = e.as_f64().unwrap();
+            worst = worst.max((f64::from(*g) - e).abs());
+            scale = scale.max(e.abs());
         }
     }
-    println!("{name}: max |logit - transformers| = {worst:.2e}");
-    assert!(worst < 1e-3, "{name}: logits differ from transformers by {worst}");
+    println!("{name}: max |logit - transformers| = {worst:.2e} (largest logit {scale:.1})");
+    assert!(
+        worst < tol * scale,
+        "{name}: logits differ from transformers by {worst}"
+    );
 
     // Greedy decoding, one token per step, must reproduce transformers'
     // generate() exactly.
@@ -74,7 +99,12 @@ fn check(name: &str) {
         let l = m.forward(
             &pool,
             &mut cache,
-            &[Chunk { tokens: &[next], pos, blocks: &table, logits: Logits::Last }],
+            &[Chunk {
+                tokens: &[next],
+                pos,
+                blocks: &table,
+                logits: Logits::Last,
+            }],
         );
         next = argmax(&l);
         out.push(next);
@@ -96,4 +126,11 @@ fn llama3_with_tied_embeddings_and_rope_scaling_matches_transformers() {
 #[test]
 fn qwen2_with_qkv_bias_matches_transformers() {
     check("qwen2");
+}
+
+#[test]
+fn downloaded_models_match_transformers() {
+    for dir in real_models() {
+        check_dir(&dir, "ferrolm-reference.json", 1e-3);
+    }
 }

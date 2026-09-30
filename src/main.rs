@@ -51,7 +51,9 @@ impl Args {
     }
 
     fn num<T: std::str::FromStr>(&self, name: &str, default: T) -> T {
-        self.get(name).map_or(default, |v| v.parse().unwrap_or_else(|_| die(&format!("{name}: bad value {v:?}"))))
+        self.get(name).map_or(default, |v| {
+            v.parse().unwrap_or_else(|_| die(&format!("{name}: bad value {v:?}")))
+        })
     }
 
     fn range(&self, name: &str, default: (usize, usize)) -> (usize, usize) {
@@ -86,7 +88,9 @@ fn shape(name: &str) -> Config {
         "smollm2-135m" => (576, 1536, 30, 9, 3, 100000.0),
         "smollm2-360m" => (960, 2560, 32, 15, 5, 100000.0),
         "smollm2-1.7b" => (2048, 8192, 24, 32, 32, 130000.0),
-        _ => die(&format!("unknown shape {name:?}; try smollm2-135m, smollm2-360m or smollm2-1.7b")),
+        _ => die(&format!(
+            "unknown shape {name:?}; try smollm2-135m, smollm2-360m or smollm2-1.7b"
+        )),
     };
     Config {
         arch: "llama".into(),
@@ -139,7 +143,9 @@ fn engine_config(a: &Args, m: &Model) -> EngineConfig {
             "static" => Admission::Static,
             other => die(&format!("unknown admission {other:?}")),
         },
-        reserve_tokens: a.get("--reserve").map(|v| v.parse().unwrap_or_else(|_| die("bad --reserve"))),
+        reserve_tokens: a
+            .get("--reserve")
+            .map(|v| v.parse().unwrap_or_else(|_| die("bad --reserve"))),
         spec_k: a.num("--spec-k", 4),
     }
 }
@@ -177,8 +183,14 @@ fn main() {
             let tok = Tokenizer::load(Path::new(dir)).unwrap_or_else(|e| die(&format!("tokenizer: {e}")));
             let (mut engine, handle, _) = build(&a);
             std::thread::spawn(move || engine.run());
-            let name = Path::new(dir).file_name().map_or(dir.to_string(), |n| n.to_string_lossy().into_owned());
-            let addr = format!("{}:{}", a.get("--host").unwrap_or("127.0.0.1"), a.num("--port", 8000u16));
+            let name = Path::new(dir)
+                .file_name()
+                .map_or(dir.to_string(), |n| n.to_string_lossy().into_owned());
+            let addr = format!(
+                "{}:{}",
+                a.get("--host").unwrap_or("127.0.0.1"),
+                a.num("--port", 8000u16)
+            );
             let server = Arc::new(Server::new(handle, Arc::new(tok), name));
             server.listen(&addr).unwrap_or_else(|e| die(&format!("{addr}: {e}")));
         }

@@ -99,7 +99,14 @@ pub fn run(mut engine: Engine, handle: Handle, w: &Workload) -> Summary {
             let prompt_len = prompt.len();
             let (rx, _cancel) = handle.submit(prompt, params);
             std::thread::spawn(move || {
-                let mut r = Record { arrival, first: None, done: 0.0, tokens: 0, prompt: prompt_len, finish: Finish::Cancelled };
+                let mut r = Record {
+                    arrival,
+                    first: None,
+                    done: 0.0,
+                    tokens: 0,
+                    prompt: prompt_len,
+                    finish: Finish::Cancelled,
+                };
                 loop {
                     match rx.recv() {
                         Ok(Event::Token(_)) => {
@@ -126,7 +133,10 @@ pub fn run(mut engine: Engine, handle: Handle, w: &Workload) -> Summary {
 }
 
 fn summarize(rs: &[Record], engine: Stats) -> Summary {
-    let ok: Vec<&Record> = rs.iter().filter(|r| matches!(r.finish, Finish::Length | Finish::Stop)).collect();
+    let ok: Vec<&Record> = rs
+        .iter()
+        .filter(|r| matches!(r.finish, Finish::Length | Finish::Stop))
+        .collect();
     let first_arrival = rs.iter().map(|r| r.arrival).fold(f64::INFINITY, f64::min);
     let duration = rs.iter().map(|r| r.done).fold(0.0, f64::max) - first_arrival;
     let output: usize = ok.iter().map(|r| r.tokens).sum();
@@ -169,7 +179,11 @@ impl Summary {
             self.output_tps,
             self.total_tps,
             self.req_per_s,
-            if self.failed > 0 { format!(", {} FAILED", self.failed) } else { String::new() }
+            if self.failed > 0 {
+                format!(", {} FAILED", self.failed)
+            } else {
+                String::new()
+            }
         );
         println!(
             "  TTFT p50 {:.2} s  p90 {:.2} s  p99 {:.2} s | TPOT p50 {:.0} ms  p99 {:.0} ms | E2E p50 {:.1} s  p99 {:.1} s",

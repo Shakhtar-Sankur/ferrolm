@@ -27,7 +27,11 @@ fn prompts(n: usize, seed: u64) -> Vec<Vec<u32>> {
 }
 
 fn greedy(max_tokens: usize) -> SamplingParams {
-    SamplingParams { max_tokens, ignore_eos: true, ..Default::default() }
+    SamplingParams {
+        max_tokens,
+        ignore_eos: true,
+        ..Default::default()
+    }
 }
 
 /// Submits everything, serves until idle, and returns each request's
@@ -48,7 +52,11 @@ fn serve(
 fn alone(reqs: &[(Vec<u32>, SamplingParams)]) -> Vec<Vec<u32>> {
     reqs.iter()
         .map(|r| {
-            let cfg = EngineConfig { max_seqs: 1, prefix_cache: false, ..Default::default() };
+            let cfg = EngineConfig {
+                max_seqs: 1,
+                prefix_cache: false,
+                ..Default::default()
+            };
             serve(cfg, None, std::slice::from_ref(r)).0.remove(0).0
         })
         .collect()
@@ -60,8 +68,17 @@ fn batching_and_chunked_prefill_do_not_change_outputs() {
     let want = alone(&reqs);
     // A small token budget splits prompts into chunks and mixes prefill
     // with decoding in the same step.
-    for (budget, admission) in [(37, Admission::Continuous), (512, Admission::Continuous), (64, Admission::Static)] {
-        let cfg = EngineConfig { max_batch_tokens: budget, admission, prefix_cache: false, ..Default::default() };
+    for (budget, admission) in [
+        (37, Admission::Continuous),
+        (512, Admission::Continuous),
+        (64, Admission::Static),
+    ] {
+        let cfg = EngineConfig {
+            max_batch_tokens: budget,
+            admission,
+            prefix_cache: false,
+            ..Default::default()
+        };
         let (got, st) = serve(cfg, None, &reqs);
         for (i, (g, f)) in got.iter().enumerate() {
             assert_eq!(f, &Finish::Length);
@@ -80,14 +97,21 @@ fn prefix_cache_hits_do_not_change_outputs() {
         .map(|p| ([system.clone(), p].concat(), greedy(16)))
         .collect();
     let want = alone(&reqs);
-    let cfg = EngineConfig { max_seqs: 4, ..Default::default() };
+    let cfg = EngineConfig {
+        max_seqs: 4,
+        ..Default::default()
+    };
     let (got, st) = serve(cfg, None, &reqs);
     for (i, (g, _)) in got.iter().enumerate() {
         assert_eq!(g, &want[i], "request {i}");
     }
     // The first four requests are admitted together, before the shared
     // prefix is cached; each later one reuses its 6 full blocks.
-    assert!(st.cached_tokens >= 12 * 96, "only {} tokens from the cache", st.cached_tokens);
+    assert!(
+        st.cached_tokens >= 12 * 96,
+        "only {} tokens from the cache",
+        st.cached_tokens
+    );
 }
 
 #[test]
@@ -95,7 +119,11 @@ fn preemption_and_recompute_do_not_change_outputs() {
     let reqs: Vec<_> = prompts(20, 3).into_iter().map(|p| (p, greedy(40))).collect();
     let want = alone(&reqs);
     // 40 blocks of 16 tokens cannot hold 20 growing sequences.
-    let cfg = EngineConfig { kv_blocks: 40, max_batch_tokens: 128, ..Default::default() };
+    let cfg = EngineConfig {
+        kv_blocks: 40,
+        max_batch_tokens: 128,
+        ..Default::default()
+    };
     let (got, st) = serve(cfg, None, &reqs);
     for (i, (g, _)) in got.iter().enumerate() {
         assert_eq!(g, &want[i], "request {i}");
@@ -110,13 +138,20 @@ fn speculative_greedy_decoding_matches_the_target_exactly() {
     // A related draft (the target's first layer) and a perfect one (the
     // target itself), with different proposal lengths.
     for (layers, k) in [(1, 4), (3, 3), (1, 1)] {
-        let cfg = EngineConfig { spec_k: k, kv_blocks: 200, ..Default::default() };
+        let cfg = EngineConfig {
+            spec_k: k,
+            kv_blocks: 200,
+            ..Default::default()
+        };
         let (got, st) = serve(cfg, Some(model().truncated(layers)), &reqs);
         for (i, (g, _)) in got.iter().enumerate() {
             assert_eq!(g, &want[i], "request {i}, draft of {layers} layers, k={k}");
         }
         let rate = st.spec_accepted as f64 / st.spec_proposed as f64;
-        println!("draft layers {layers}, k={k}: {:.0}% of proposals accepted", rate * 100.0);
+        println!(
+            "draft layers {layers}, k={k}: {:.0}% of proposals accepted",
+            rate * 100.0
+        );
         assert!(st.spec_proposed > 0);
         if layers == 3 {
             assert_eq!(st.spec_accepted, st.spec_proposed, "the target as its own draft");
@@ -135,7 +170,16 @@ fn exact_two_token_distribution(prompt: &[u32], params: &SamplingParams) -> Vec<
     let next = |tokens: &[u32]| {
         let c = &m.cfg;
         let mut cache = KvCache::new(c.layers, c.kv_heads, c.head_dim, 16, 16);
-        let l = m.forward(&pool, &mut cache, &[Chunk { tokens, pos: 0, blocks: &blocks, logits: Logits::Last }]);
+        let l = m.forward(
+            &pool,
+            &mut cache,
+            &[Chunk {
+                tokens,
+                pos: 0,
+                blocks: &blocks,
+                logits: Logits::Last,
+            }],
+        );
         ferrolm::sampler::distribution(&l, params)
     };
     let mut out = Vec::new();
@@ -173,10 +217,17 @@ fn speculative_sampling_keeps_the_target_distribution() {
             let expected = p * n as f64;
             stat += (observed - expected).powi(2) / expected;
         }
-        assert!(out.iter().all(|(t, _)| exact.iter().any(|(s, _)| s == t)), "impossible continuation sampled");
+        assert!(
+            out.iter().all(|(t, _)| exact.iter().any(|(s, _)| s == t)),
+            "impossible continuation sampled"
+        );
         stat
     };
-    let cfg = EngineConfig { spec_k: 3, kv_blocks: 600, ..Default::default() };
+    let cfg = EngineConfig {
+        spec_k: 3,
+        kv_blocks: 600,
+        ..Default::default()
+    };
     let plain = chi2(&serve(cfg.clone(), None, &reqs).0);
     let (spec, st) = serve(cfg, Some(model().truncated(1)), &reqs);
     let spec = chi2(&spec);
@@ -194,8 +245,14 @@ fn speculative_sampling_keeps_the_target_distribution() {
 #[test]
 fn reserving_whole_sequences_admits_fewer_at_once() {
     let reqs: Vec<_> = prompts(16, 6).into_iter().map(|p| (p, greedy(8))).collect();
-    let paged = EngineConfig { kv_blocks: 100, ..Default::default() };
-    let reserved = EngineConfig { reserve_tokens: Some(512), ..paged.clone() };
+    let paged = EngineConfig {
+        kv_blocks: 100,
+        ..Default::default()
+    };
+    let reserved = EngineConfig {
+        reserve_tokens: Some(512),
+        ..paged.clone()
+    };
     let (a, sa) = serve(paged, None, &reqs);
     let (b, sb) = serve(reserved, None, &reqs);
     assert_eq!(a, b);
@@ -206,7 +263,10 @@ fn reserving_whole_sequences_admits_fewer_at_once() {
 
 #[test]
 fn rejects_what_cannot_be_served_and_honours_cancellation() {
-    let cfg = EngineConfig { kv_blocks: 8, ..Default::default() };
+    let cfg = EngineConfig {
+        kv_blocks: 8,
+        ..Default::default()
+    };
     let (mut e, h) = Engine::new(model(), None, Pool::new(2), cfg);
     let (too_long, _) = h.submit(vec![5; 200], greedy(4));
     let (empty, _) = h.submit(vec![], greedy(4));

@@ -141,7 +141,7 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
         return unsafe { avx2::dot(a, b) };
     }
     let mut acc = [0f32; 8];
-    for (ca, cb) in a.chunks_exact(8).zip(b.chunks_exact(8)) {
+    for (ca, cb) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
         for l in 0..8 {
             acc[l] = ca[l].mul_add(cb[l], acc[l]);
         }
@@ -275,12 +275,12 @@ impl Tile<'_> {
         }
         for i in 0..mr {
             for p in 0..np {
-                for c in 0..PANEL {
+                for (c, &slot) in SLOT.iter().enumerate() {
                     let at = self.y0 + i * self.ys + p * PANEL + c;
                     // SAFETY: as above.
                     let mut acc = if self.init { 0.0 } else { unsafe { self.y.read(at) } };
                     for kk in 0..self.kc {
-                        let wv = bf16_to_f32(self.w[p * self.ws + kk * PANEL + SLOT[c]]);
+                        let wv = bf16_to_f32(self.w[p * self.ws + kk * PANEL + slot]);
                         acc = self.x[i * self.xs + kk].mul_add(wv, acc);
                     }
                     unsafe { self.y.write(at, acc) };
@@ -316,6 +316,7 @@ mod avx512 {
                 for (i, b) in xb.iter_mut().enumerate() {
                     *b = _mm512_set1_ps(*x.add(i * t.xs + kk));
                 }
+                #[allow(clippy::needless_range_loop)]
                 for p in 0..NP {
                     let raw = _mm512_loadu_si512(w.add(p * t.ws + kk * PANEL).cast());
                     let lo = _mm512_castsi512_ps(_mm512_unpacklo_epi16(zero, raw));
@@ -365,6 +366,7 @@ mod avx2 {
                 for (i, b) in xb.iter_mut().enumerate() {
                     *b = _mm256_broadcast_ss(&*x.add(i * t.xs + kk));
                 }
+                #[allow(clippy::needless_range_loop)]
                 for p in 0..NP {
                     let base = w.add(p * t.ws + kk * PANEL);
                     let r0 = _mm256_loadu_si256(base.cast());
@@ -405,7 +407,11 @@ mod avx2 {
         let mut acc = _mm256_setzero_ps();
         for i in (0..a.len()).step_by(8) {
             unsafe {
-                acc = _mm256_fmadd_ps(_mm256_loadu_ps(a.as_ptr().add(i)), _mm256_loadu_ps(b.as_ptr().add(i)), acc);
+                acc = _mm256_fmadd_ps(
+                    _mm256_loadu_ps(a.as_ptr().add(i)),
+                    _mm256_loadu_ps(b.as_ptr().add(i)),
+                    acc,
+                );
             }
         }
         unsafe { hsum(acc) }
@@ -418,7 +424,10 @@ mod avx2 {
         unsafe {
             for i in (0..n8).step_by(8) {
                 let p = v.as_mut_ptr().add(i);
-                let x = _mm256_min_ps(_mm256_max_ps(_mm256_loadu_ps(p), _mm256_set1_ps(EXP_MIN)), _mm256_set1_ps(EXP_MAX));
+                let x = _mm256_min_ps(
+                    _mm256_max_ps(_mm256_loadu_ps(p), _mm256_set1_ps(EXP_MIN)),
+                    _mm256_set1_ps(EXP_MAX),
+                );
                 let n = _mm256_round_ps(
                     _mm256_mul_ps(x, _mm256_set1_ps(LOG2E)),
                     _MM_FROUND_TO_NEAREST_INT | _MM_FROUND_NO_EXC,
@@ -475,7 +484,10 @@ mod avx2 {
         while i + 8 <= n {
             unsafe {
                 let p = acc.as_mut_ptr().add(i);
-                _mm256_storeu_ps(p, _mm256_fmadd_ps(sv, _mm256_loadu_ps(v.as_ptr().add(i)), _mm256_loadu_ps(p)));
+                _mm256_storeu_ps(
+                    p,
+                    _mm256_fmadd_ps(sv, _mm256_loadu_ps(v.as_ptr().add(i)), _mm256_loadu_ps(p)),
+                );
             }
             i += 8;
         }
@@ -504,7 +516,14 @@ pub fn rms_norm(x: &[f32], weight: &[f32], eps: f32, out: &mut [f32]) {
 const LOG2E: f32 = std::f32::consts::LOG2_E;
 const LN2_HI: f32 = 0.693_359_4;
 const LN2_LO: f32 = -2.121_944_4e-4;
-const EXP_C: [f32; 6] = [1.987_569_1e-4, 1.398_2e-3, 8.333_452e-3, 4.166_579_6e-2, 0.166_666_65, 0.5];
+const EXP_C: [f32; 6] = [
+    1.987_569_1e-4,
+    1.398_2e-3,
+    8.333_452e-3,
+    4.166_579_6e-2,
+    0.166_666_65,
+    0.5,
+];
 const EXP_MIN: f32 = -87.0;
 const EXP_MAX: f32 = 88.0;
 
@@ -595,7 +614,7 @@ pub fn attend(q: &[f32], hd: usize, n: usize, scale: f32, kv: &KvView, scores: &
     let heads = q.len() / hd;
     scores.clear();
     scores.resize(heads * n, 0.0);
-    let simd = cfg!(target_arch = "x86_64") && use_avx2() && hd % 8 == 0;
+    let simd = cfg!(target_arch = "x86_64") && use_avx2() && hd.is_multiple_of(8);
     #[cfg(target_arch = "x86_64")]
     if simd {
         unsafe { avx2::scores(q, hd, n, scale, kv, scores) };
@@ -658,7 +677,10 @@ mod tests {
         for (&x, &e) in xs.iter().zip(&simd) {
             assert_eq!(e.to_bits(), exp(x).to_bits(), "exp({x})");
             let want = f64::from(x.clamp(EXP_MIN, EXP_MAX)).exp();
-            assert!((f64::from(e) - want).abs() <= want * 3e-7, "exp({x}) = {e}, want {want}");
+            assert!(
+                (f64::from(e) - want).abs() <= want * 3e-7,
+                "exp({x}) = {e}, want {want}"
+            );
         }
     }
 

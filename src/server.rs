@@ -24,7 +24,13 @@ pub struct Server {
 
 impl Server {
     pub fn new(handle: Handle, tokenizer: Arc<Tokenizer>, model_name: String) -> Server {
-        Server { handle, tokenizer, model_name, started: Instant::now(), ids: AtomicU64::new(1) }
+        Server {
+            handle,
+            tokenizer,
+            model_name,
+            started: Instant::now(),
+            ids: AtomicU64::new(1),
+        }
     }
 
     pub fn listen(self: Arc<Self>, addr: &str) -> std::io::Result<()> {
@@ -48,7 +54,10 @@ impl Server {
         let mut line = String::new();
         reader.read_line(&mut line)?;
         let mut parts = line.split_whitespace();
-        let (method, path) = (parts.next().unwrap_or("").to_string(), parts.next().unwrap_or("").to_string());
+        let (method, path) = (
+            parts.next().unwrap_or("").to_string(),
+            parts.next().unwrap_or("").to_string(),
+        );
         let mut length = 0usize;
         loop {
             let mut h = String::new();
@@ -62,7 +71,12 @@ impl Server {
             }
         }
         if length > 8 << 20 {
-            return respond(&mut conn, 413, "application/json", &error_json("request body too large"));
+            return respond(
+                &mut conn,
+                413,
+                "application/json",
+                &error_json("request body too large"),
+            );
         }
         let mut body = vec![0u8; length];
         reader.read_exact(&mut body)?;
@@ -85,9 +99,19 @@ impl Server {
     }
 
     fn complete(&self, conn: &mut TcpStream, body: &[u8], chat: bool) -> std::io::Result<()> {
-        let req = match std::str::from_utf8(body).map_err(|_| "body is not UTF-8".to_string()).and_then(json::parse) {
+        let req = match std::str::from_utf8(body)
+            .map_err(|_| "body is not UTF-8".to_string())
+            .and_then(json::parse)
+        {
             Ok(v) => v,
-            Err(e) => return respond(conn, 400, "application/json", &error_json(&format!("invalid JSON: {e}"))),
+            Err(e) => {
+                return respond(
+                    conn,
+                    400,
+                    "application/json",
+                    &error_json(&format!("invalid JSON: {e}")),
+                );
+            }
         };
         let parsed = self.parse_request(&req, chat);
         let (prompt, params, stops, stream) = match parsed {
@@ -95,16 +119,27 @@ impl Server {
             Err(e) => return respond(conn, 400, "application/json", &error_json(&e)),
         };
         let prompt_tokens = prompt.len();
-        let id = format!("{}-{}", if chat { "chatcmpl" } else { "cmpl" }, self.ids.fetch_add(1, Ordering::Relaxed));
+        let id = format!(
+            "{}-{}",
+            if chat { "chatcmpl" } else { "cmpl" },
+            self.ids.fetch_add(1, Ordering::Relaxed)
+        );
         let (rx, cancel) = self.handle.submit(prompt, params);
         let mut text = Detokenizer::new(&self.tokenizer, stops);
         let mut completion_tokens = 0;
-        let object = if chat { "chat.completion.chunk" } else { "text_completion" };
+        let object = if chat {
+            "chat.completion.chunk"
+        } else {
+            "text_completion"
+        };
         let chunk = |delta: &str, finish: Option<&str>, first: bool| -> String {
             let finish = finish.map_or("null".to_string(), quote);
             let choice = if chat {
                 let role = if first { r#""role":"assistant","# } else { "" };
-                format!(r#"{{"index":0,"delta":{{{role}"content":{}}},"finish_reason":{finish}}}"#, quote(delta))
+                format!(
+                    r#"{{"index":0,"delta":{{{role}"content":{}}},"finish_reason":{finish}}}"#,
+                    quote(delta)
+                )
             } else {
                 format!(r#"{{"index":0,"text":{},"finish_reason":{finish}}}"#, quote(delta))
             };
@@ -231,7 +266,10 @@ impl Server {
             temperature: num("temperature").unwrap_or(1.0) as f32,
             top_p: num("top_p").unwrap_or(1.0) as f32,
             top_k: v.get("top_k").and_then(Json::as_usize).unwrap_or(0),
-            seed: v.get("seed").and_then(Json::as_usize).map_or_else(rand_seed, |s| s as u64),
+            seed: v
+                .get("seed")
+                .and_then(Json::as_usize)
+                .map_or_else(rand_seed, |s| s as u64),
             max_tokens: max_tokens.max(1),
             stop_ids: tok.stop_ids.clone(),
             ignore_eos: v.get("ignore_eos").and_then(Json::as_bool).unwrap_or(false),
@@ -245,30 +283,107 @@ impl Server {
             _ => Vec::new(),
         };
         let stream = v.get("stream").and_then(Json::as_bool).unwrap_or(false);
-        Ok((prompt, params, stops.into_iter().filter(|s| !s.is_empty()).collect(), stream))
+        Ok((
+            prompt,
+            params,
+            stops.into_iter().filter(|s| !s.is_empty()).collect(),
+            stream,
+        ))
     }
 
     fn metrics(&self) -> String {
         let s = self.handle.stats.lock().unwrap().clone();
         let mut m = String::new();
         let mut put = |name: &str, kind: &str, help: &str, v: String| {
-            m.push_str(&format!("# HELP ferrolm_{name} {help}\n# TYPE ferrolm_{name} {kind}\nferrolm_{name} {v}\n"));
+            m.push_str(&format!(
+                "# HELP ferrolm_{name} {help}\n# TYPE ferrolm_{name} {kind}\nferrolm_{name} {v}\n"
+            ));
         };
-        put("requests_total", "counter", "Requests received.", s.requests.to_string());
-        put("requests_finished_total", "counter", "Requests finished, cancelled or rejected.", s.finished.to_string());
-        put("prompt_tokens_total", "counter", "Prompt tokens received.", s.prompt_tokens.to_string());
-        put("generation_tokens_total", "counter", "Tokens generated.", s.generated_tokens.to_string());
-        put("prefix_cache_tokens_total", "counter", "Prompt tokens served from the prefix cache.", s.cached_tokens.to_string());
-        put("preemptions_total", "counter", "Sequences preempted for lack of cache blocks.", s.preemptions.to_string());
-        put("spec_proposed_tokens_total", "counter", "Draft tokens proposed.", s.spec_proposed.to_string());
-        put("spec_accepted_tokens_total", "counter", "Draft tokens accepted.", s.spec_accepted.to_string());
+        put(
+            "requests_total",
+            "counter",
+            "Requests received.",
+            s.requests.to_string(),
+        );
+        put(
+            "requests_finished_total",
+            "counter",
+            "Requests finished, cancelled or rejected.",
+            s.finished.to_string(),
+        );
+        put(
+            "prompt_tokens_total",
+            "counter",
+            "Prompt tokens received.",
+            s.prompt_tokens.to_string(),
+        );
+        put(
+            "generation_tokens_total",
+            "counter",
+            "Tokens generated.",
+            s.generated_tokens.to_string(),
+        );
+        put(
+            "prefix_cache_tokens_total",
+            "counter",
+            "Prompt tokens served from the prefix cache.",
+            s.cached_tokens.to_string(),
+        );
+        put(
+            "preemptions_total",
+            "counter",
+            "Sequences preempted for lack of cache blocks.",
+            s.preemptions.to_string(),
+        );
+        put(
+            "spec_proposed_tokens_total",
+            "counter",
+            "Draft tokens proposed.",
+            s.spec_proposed.to_string(),
+        );
+        put(
+            "spec_accepted_tokens_total",
+            "counter",
+            "Draft tokens accepted.",
+            s.spec_accepted.to_string(),
+        );
         put("steps_total", "counter", "Engine steps.", s.steps.to_string());
-        put("busy_seconds_total", "counter", "Time the engine spent in steps.", format!("{:.3}", s.busy_secs));
-        put("running_sequences", "gauge", "Sequences in the running batch.", s.running.to_string());
-        put("waiting_sequences", "gauge", "Sequences waiting for admission.", s.waiting.to_string());
-        put("kv_cache_blocks_used", "gauge", "Cache blocks in use.", s.kv_used_blocks.to_string());
-        put("kv_cache_blocks_total", "gauge", "Cache blocks.", s.kv_total_blocks.to_string());
-        put("uptime_seconds", "gauge", "Seconds since start.", format!("{:.0}", self.started.elapsed().as_secs_f64()));
+        put(
+            "busy_seconds_total",
+            "counter",
+            "Time the engine spent in steps.",
+            format!("{:.3}", s.busy_secs),
+        );
+        put(
+            "running_sequences",
+            "gauge",
+            "Sequences in the running batch.",
+            s.running.to_string(),
+        );
+        put(
+            "waiting_sequences",
+            "gauge",
+            "Sequences waiting for admission.",
+            s.waiting.to_string(),
+        );
+        put(
+            "kv_cache_blocks_used",
+            "gauge",
+            "Cache blocks in use.",
+            s.kv_used_blocks.to_string(),
+        );
+        put(
+            "kv_cache_blocks_total",
+            "gauge",
+            "Cache blocks.",
+            s.kv_total_blocks.to_string(),
+        );
+        put(
+            "uptime_seconds",
+            "gauge",
+            "Seconds since start.",
+            format!("{:.0}", self.started.elapsed().as_secs_f64()),
+        );
         m
     }
 }
@@ -287,7 +402,13 @@ pub struct Detokenizer<'a> {
 
 impl<'a> Detokenizer<'a> {
     pub fn new(tok: &'a Tokenizer, stops: Vec<String>) -> Detokenizer<'a> {
-        Detokenizer { tok, bytes: Vec::new(), sent: 0, stops, stopped: false }
+        Detokenizer {
+            tok,
+            bytes: Vec::new(),
+            sent: 0,
+            stops,
+            stopped: false,
+        }
     }
 
     /// Adds a token; returns the text that is now safe to send.
@@ -358,7 +479,10 @@ fn respond(conn: &mut TcpStream, status: u16, ctype: &str, body: &str) -> std::i
 }
 
 fn error_json(msg: &str) -> String {
-    format!(r#"{{"error":{{"message":{},"type":"invalid_request_error"}}}}"#, quote(msg))
+    format!(
+        r#"{{"error":{{"message":{},"type":"invalid_request_error"}}}}"#,
+        quote(msg)
+    )
 }
 
 fn unix_now() -> u64 {
@@ -366,7 +490,9 @@ fn unix_now() -> u64 {
 }
 
 fn rand_seed() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(1, |d| d.as_nanos() as u64)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(1, |d| d.as_nanos() as u64)
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 //! Byte-level BPE tokenization compatible with Hugging Face `tokenizers`
 //! for the `tokenizer.json` files of GPT-2-style models: SmolLM2, Llama 3
-//! and Qwen2. Supported pieces: added (special) tokens, the `ByteLevel`,
+//! and Qwen2. Supported pieces: added (special) tokens, the NFC
+//! normalizer, the `ByteLevel`,
 //! `Digits` and `Split` pre-tokenizers with the GPT-2, Llama 3 and Qwen2
 //! split patterns, BPE with `ignore_merges`, and `TemplateProcessing`
 //! prefixes. Anything else is reported as unsupported rather than
@@ -57,6 +58,8 @@ pub struct Tokenizer {
     special: HashSet<u32>,
     pre: Vec<Pre>,
     ignore_merges: bool,
+    /// Unicode NFC normalization before pre-tokenization (Qwen2).
+    nfc: bool,
     prefix: Vec<u32>,
     pub chat: ChatFormat,
     /// Tokens that end a generated reply, beyond the model's own EOS.
@@ -102,9 +105,11 @@ impl Tokenizer {
     }
 
     pub fn from_json(v: &Json) -> Result<Tokenizer, String> {
-        if !matches!(v.get("normalizer"), None | Some(Json::Null)) {
-            return Err("tokenizer normalizers are not supported".into());
-        }
+        let nfc = match v.get("normalizer") {
+            None | Some(Json::Null) => false,
+            Some(n) if n.get("type").and_then(Json::as_str) == Some("NFC") => true,
+            Some(n) => return Err(format!("unsupported normalizer {:?}", n.get("type"))),
+        };
         let model = v.get("model").ok_or("tokenizer.json without model")?;
         if model.get("type").and_then(Json::as_str) != Some("BPE") {
             return Err("only BPE tokenizers are supported".into());
@@ -136,15 +141,13 @@ impl Tokenizer {
         for (rank, m) in model.get("merges").map(Json::as_arr).unwrap_or(&[]).iter().enumerate() {
             let (a, b) = match m {
                 Json::Str(s) => s.split_once(' ').ok_or("bad merge")?,
-                Json::Arr(p) if p.len() == 2 => (
-                    p[0].as_str().ok_or("bad merge")?,
-                    p[1].as_str().ok_or("bad merge")?,
-                ),
+                Json::Arr(p) if p.len() == 2 => (p[0].as_str().ok_or("bad merge")?, p[1].as_str().ok_or("bad merge")?),
                 _ => return Err("bad merge".into()),
             };
             let (ba, bb) = (to_bytes(a), to_bytes(b));
             let joined = [ba.as_slice(), bb.as_slice()].concat();
-            let (Some(&ia), Some(&ib), Some(&ij)) = (by_bytes.get(&ba), by_bytes.get(&bb), by_bytes.get(&joined)) else {
+            let (Some(&ia), Some(&ib), Some(&ij)) = (by_bytes.get(&ba), by_bytes.get(&bb), by_bytes.get(&joined))
+            else {
                 return Err(format!("merge {a:?} {b:?} refers to unknown tokens"));
             };
             merges.entry((ia, ib)).or_insert((rank as u32, ij));
@@ -153,7 +156,11 @@ impl Tokenizer {
         let mut special = HashSet::new();
         for a in v.get("added_tokens").map(Json::as_arr).unwrap_or(&[]) {
             let id = a.get("id").and_then(Json::as_usize).ok_or("added token without id")? as u32;
-            let content = a.get("content").and_then(Json::as_str).ok_or("added token without content")?.to_string();
+            let content = a
+                .get("content")
+                .and_then(Json::as_str)
+                .ok_or("added token without content")?
+                .to_string();
             let is_special = a.get("special").and_then(Json::as_bool).unwrap_or(false);
             if is_special {
                 special.insert(id);
@@ -181,6 +188,7 @@ impl Tokenizer {
             special,
             pre,
             ignore_merges: model.get("ignore_merges").and_then(Json::as_bool).unwrap_or(false),
+            nfc,
             prefix,
             chat: ChatFormat::Plain,
             stop_ids: Vec::new(),
@@ -235,7 +243,11 @@ impl Tokenizer {
         if text.is_empty() {
             return;
         }
-        let mut pieces = vec![text.to_string()];
+        let mut pieces = vec![if self.nfc {
+            crate::unicode::nfc(text).into_owned()
+        } else {
+            text.to_string()
+        }];
         for step in &self.pre {
             pieces = pieces.iter().flat_map(|p| split(step, p)).collect();
         }
@@ -314,7 +326,10 @@ impl Tokenizer {
                     s.push_str("<|begin_of_text|>");
                 }
                 for (role, content) in messages {
-                    s.push_str(&format!("<|start_header_id|>{role}<|end_header_id|>\n\n{}<|eot_id|>", content.trim()));
+                    s.push_str(&format!(
+                        "<|start_header_id|>{role}<|end_header_id|>\n\n{}<|eot_id|>",
+                        content.trim()
+                    ));
                 }
                 s.push_str("<|start_header_id|>assistant<|end_header_id|>\n\n");
             }
@@ -331,14 +346,17 @@ impl Tokenizer {
 
 fn chat_format(template: &str) -> ChatFormat {
     if template.contains("<|im_start|>") {
-        // A default system prompt appears as a literal system turn.
-        let marker = "<|im_start|>system\\n";
-        let default_system = template.match_indices(marker).find_map(|(i, _)| {
-            let rest = &template[i + marker.len()..];
-            let end = rest.find("<|im_end|>")?;
-            let body = &rest[..end];
-            (!body.contains('{') && !body.contains('\'')).then(|| body.to_string())
-        });
+        // A default system prompt appears as a literal system turn; the
+        // newline is a real one in some templates and an escape in others.
+        let default_system = ["<|im_start|>system\n", "<|im_start|>system\\n"]
+            .iter()
+            .find_map(|marker| {
+                template.match_indices(marker).find_map(|(i, _)| {
+                    let rest = &template[i + marker.len()..];
+                    let body = &rest[..rest.find("<|im_end|>")?];
+                    (!body.is_empty() && !body.contains(['{', '\'', '+'])).then(|| body.to_string())
+                })
+            });
         ChatFormat::ChatMl { default_system }
     } else if template.contains("<|start_header_id|>") {
         ChatFormat::Llama3
@@ -382,7 +400,8 @@ fn pre_steps(p: &Json) -> Result<Vec<Pre>, String> {
 
 const GPT2_RE: &str = r"'s|'t|'re|'ve|'m|'ll|'d| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+";
 const LLAMA3_RE: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
-const QWEN2_RE: &str = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
+const QWEN2_RE: &str =
+    r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+";
 
 fn pattern_for(re: &str) -> Result<Pattern, String> {
     match re {
@@ -414,7 +433,11 @@ fn template_prefix(pp: Option<&Json>, by_bytes: &HashMap<Vec<u8>, u32>, added: &
             continue;
         }
         for piece in p.get("single").map(Json::as_arr).unwrap_or(&[]) {
-            match piece.get("SpecialToken").and_then(|t| t.get("id")).and_then(Json::as_str) {
+            match piece
+                .get("SpecialToken")
+                .and_then(|t| t.get("id"))
+                .and_then(Json::as_str)
+            {
                 Some(tok) => prefix.extend(find(tok)),
                 None => break,
             }
@@ -441,8 +464,15 @@ fn split(step: &Pre, s: &str) -> Vec<String> {
             out
         }
         Pre::Split(p) => by_pattern(*p, s),
-        Pre::ByteLevel { add_prefix_space, regex } => {
-            let s = if *add_prefix_space && !s.starts_with(' ') { format!(" {s}") } else { s.to_string() };
+        Pre::ByteLevel {
+            add_prefix_space,
+            regex,
+        } => {
+            let s = if *add_prefix_space && !s.starts_with(' ') {
+                format!(" {s}")
+            } else {
+                s.to_string()
+            };
             if *regex { by_pattern(Pattern::Gpt2, &s) } else { vec![s] }
         }
     }
@@ -583,6 +613,9 @@ mod tests {
             pieces(Pattern::Llama3 { max_digits: 3 }, "I'LL pay 12345 now.\n\n  ok"),
             ["I", "'LL", " pay", " ", "123", "45", " now", ".\n\n", " ", " ok"]
         );
-        assert_eq!(pieces(Pattern::Llama3 { max_digits: 3 }, "x  \n\n y"), ["x", "  \n\n", " y"]);
+        assert_eq!(
+            pieces(Pattern::Llama3 { max_digits: 3 }, "x  \n\n y"),
+            ["x", "  \n\n", " y"]
+        );
     }
 }

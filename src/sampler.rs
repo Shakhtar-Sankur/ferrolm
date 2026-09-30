@@ -98,7 +98,11 @@ pub fn draw(dist: &[(u32, f32)], rng: &mut Rng) -> u32 {
 }
 
 pub fn sample(logits: &[f32], p: &SamplingParams, rng: &mut Rng) -> u32 {
-    if p.greedy() { argmax(logits) } else { draw(&distribution(logits, p), rng) }
+    if p.greedy() {
+        argmax(logits)
+    } else {
+        draw(&distribution(logits, p), rng)
+    }
 }
 
 #[cfg(test)]
@@ -108,7 +112,12 @@ mod tests {
     #[test]
     fn filters_and_samples_in_proportion() {
         let logits = [2.0f32, 1.0, 0.0, -1.0];
-        let p = SamplingParams { temperature: 1.0, top_k: 3, top_p: 0.95, ..Default::default() };
+        let p = SamplingParams {
+            temperature: 1.0,
+            top_k: 3,
+            top_p: 0.95,
+            ..Default::default()
+        };
         let d = distribution(&logits, &p);
         assert_eq!(d.iter().map(|e| e.0).collect::<Vec<_>>(), [0, 1, 2]);
         let mut rng = Rng::new(3);

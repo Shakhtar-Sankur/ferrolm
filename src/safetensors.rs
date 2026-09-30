@@ -123,8 +123,7 @@ impl Checkpoint {
         f.seek(SeekFrom::Start(t.offset))
             .map_err(|e| format!("{path:?}: {e}"))?;
         let mut buf = vec![0u8; t.len];
-        f.read_exact(&mut buf)
-            .map_err(|e| format!("{name}: {e}"))?;
+        f.read_exact(&mut buf).map_err(|e| format!("{name}: {e}"))?;
         Ok((t, buf))
     }
 
@@ -133,7 +132,7 @@ impl Checkpoint {
     pub fn bf16(&self, name: &str) -> Result<Vec<u16>, String> {
         let (t, b) = self.raw(name)?;
         Ok(match t.dtype {
-            DType::BF16 => b.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect(),
+            DType::BF16 => b.as_chunks::<2>().0.iter().map(|&c| u16::from_le_bytes(c)).collect(),
             _ => to_f32(t.dtype, &b).into_iter().map(f32_to_bf16).collect(),
         })
     }
@@ -146,17 +145,18 @@ impl Checkpoint {
 
 fn to_f32(dtype: DType, b: &[u8]) -> Vec<f32> {
     match dtype {
-        DType::F32 => b
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect(),
+        DType::F32 => b.as_chunks::<4>().0.iter().map(|&c| f32::from_le_bytes(c)).collect(),
         DType::BF16 => b
-            .chunks_exact(2)
-            .map(|c| bf16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| bf16_to_f32(u16::from_le_bytes(c)))
             .collect(),
         DType::F16 => b
-            .chunks_exact(2)
-            .map(|c| f16_to_f32(u16::from_le_bytes([c[0], c[1]])))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&c| f16_to_f32(u16::from_le_bytes(c)))
             .collect(),
     }
 }

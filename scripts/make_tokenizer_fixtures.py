@@ -13,7 +13,8 @@ import os
 import random
 import sys
 
-from tokenizers import Regex, Tokenizer, decoders, models, pre_tokenizers, processors, trainers
+from tokenizers import Regex, Tokenizer, decoders, models, normalizers, pre_tokenizers, processors, trainers
+import unicodedata
 
 LLAMA3 = r"(?i:'s|'t|'re|'ve|'m|'ll|'d)|[^\r\n\p{L}\p{N}]?\p{L}+|\p{N}{1,3}| ?[^\s\p{L}\p{N}]+[\r\n]*|\s*[\r\n]+|\s+(?!\S)|\s+"
 QWEN2 = LLAMA3.replace(r"\p{N}{1,3}", r"\p{N}")
@@ -42,6 +43,9 @@ SAMPLES = [
     "email@example.com https://example.com/path?q=1&r=2#frag",
     "Ünïcödé àçcénts façade naïve coöperate",
     "ΑΒΓ αβγ ſs ǅ ﬁ",
+    "decomposed e\u0301 a\u0308 o\u0302\u0323 \u1100\u1161\u11a8 \u212b \u2126 q\u0307\u0323",
+    "Tiếng Việt có dấu: Trường Sa, Hoàng Sa",
+    unicodedata.normalize("NFD", "Ünïcödé, 한국어, Tiếng Việt, ﬁ"),
 ]
 
 
@@ -71,6 +75,10 @@ def random_strings(n, seed):
             if 0xD800 <= cp <= 0xDFFF:
                 continue
             s.append(chr(cp))
+            if rng.random() < 0.15:
+                s.append(chr(rng.randint(0x300, 0x36F)))
+            if rng.random() < 0.05:
+                s.append(chr(rng.randint(0x1100, 0x11FF)))
             if rng.random() < 0.2:
                 s.append(rng.choice([" ", "  ", "\n", "'s", "'LL", "123", "\t", " \n "]))
         out.append("".join(s))
@@ -79,6 +87,8 @@ def random_strings(n, seed):
 
 def build(kind):
     tok = Tokenizer(models.BPE(ignore_merges=(kind == "llama3")))
+    if kind == "qwen2":
+        tok.normalizer = normalizers.NFC()
     if kind == "smollm2":
         tok.pre_tokenizer = pre_tokenizers.Sequence([
             pre_tokenizers.Digits(individual_digits=True),
