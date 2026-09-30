@@ -49,7 +49,9 @@ pub struct Tokenizer {
     token_bytes: Vec<Vec<u8>>,
     by_bytes: HashMap<Vec<u8>, u32>,
     merges: HashMap<(u32, u32), (u32, u32)>,
-    byte_ids: [u32; 256],
+    /// The token for each byte; bytes without one are dropped, as
+    /// Hugging Face's BPE does when there is no unknown token.
+    byte_ids: [Option<u32>; 256],
     /// Longest first, so the longest added token wins at a position.
     added: Vec<Added>,
     special: HashSet<u32>,
@@ -126,11 +128,9 @@ impl Tokenizer {
             by_bytes.insert(b.clone(), id as u32);
             token_bytes[id] = b;
         }
-        let mut byte_ids = [0u32; 256];
+        let mut byte_ids = [None; 256];
         for (b, &c) in chars.iter().enumerate() {
-            byte_ids[b] = *by_bytes
-                .get(&to_bytes(&c.to_string()))
-                .ok_or_else(|| format!("vocabulary has no token for byte {b:#x}"))?;
+            byte_ids[b] = by_bytes.get(&to_bytes(&c.to_string())).copied();
         }
         let mut merges = HashMap::new();
         for (rank, m) in model.get("merges").map(Json::as_arr).unwrap_or(&[]).iter().enumerate() {
@@ -255,7 +255,7 @@ impl Tokenizer {
             out.extend_from_slice(ids);
             return;
         }
-        let mut sym: Vec<u32> = word.iter().map(|&b| self.byte_ids[b as usize]).collect();
+        let mut sym: Vec<u32> = word.iter().filter_map(|&b| self.byte_ids[b as usize]).collect();
         loop {
             // The lowest-ranked adjacent pair, leftmost on ties.
             let best = sym
