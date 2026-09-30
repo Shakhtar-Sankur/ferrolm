@@ -3,6 +3,7 @@ use ferrolm::config::{Config, RopeScaling};
 use ferrolm::engine::{Admission, Engine, EngineConfig, Event};
 use ferrolm::model::Model;
 use ferrolm::pool::Pool;
+use ferrolm::quant::Quant;
 use ferrolm::sampler::SamplingParams;
 use ferrolm::server::{Detokenizer, Server};
 use ferrolm::tokenizer::Tokenizer;
@@ -21,9 +22,13 @@ USAGE:
                    [--rate REQ_PER_S] [--prompt-len 64..256] [--gen-len 32..128]
                    [--shared-prefix 0] [--prompt-file FILE] [--temperature 0] [--seed 1] [--label NAME]
                    [--json FILE] [engine options]
+  ferrolm perplexity --model DIR --data FILE [--quant int8|int4] [--awq --calib FILE]
+                   [--ctx 512] [--windows 40] [--json FILE]
   ferrolm info     --model DIR|random:SHAPE
 
 ENGINE OPTIONS:
+  --quant bf16|int8|int4 weight format for the transformer layers (default bf16)
+  --draft-quant FORMAT   the same, for the draft model
   --kv-mem 1G            memory for the KV cache (K, M, G suffixes)
   --block-size 16        tokens per cache block
   --max-batch-tokens 512 tokens processed per step
@@ -112,12 +117,13 @@ fn shape(name: &str) -> Config {
     }
 }
 
-fn load(spec: &str) -> Model {
+fn load(spec: &str, quant: Quant) -> Model {
     let t = Instant::now();
-    let m = match spec.strip_prefix("random:") {
+    let mut m = match spec.strip_prefix("random:") {
         Some(s) => Model::random(shape(s), 1),
         None => Model::load(Path::new(spec)).unwrap_or_else(|e| die(&format!("{spec}: {e}"))),
     };
+    m.quantize(quant, None);
     eprintln!(
         "ferrolm: loaded {spec} ({}, {:.0}M parameters, {} layers) in {:.1} s",
         m.cfg.arch,
@@ -125,7 +131,18 @@ fn load(spec: &str) -> Model {
         m.cfg.layers,
         t.elapsed().as_secs_f64()
     );
+    eprintln!(
+        "ferrolm: weights {} ({:.0} MB)",
+        quant.name(),
+        m.weight_bytes() as f64 / 1e6
+    );
     m
+}
+
+fn quant_arg(a: &Args, name: &str) -> Quant {
+    a.get(name).map_or(Quant::Bf16, |q| {
+        Quant::parse(q).unwrap_or_else(|| die(&format!("{name}: expected bf16, int8 or int4")))
+    })
 }
 
 fn engine_config(a: &Args, m: &Model) -> EngineConfig {
@@ -151,8 +168,11 @@ fn engine_config(a: &Args, m: &Model) -> EngineConfig {
 }
 
 fn build(a: &Args) -> (Engine, ferrolm::engine::Handle, EngineConfig) {
-    let model = load(a.get("--model").unwrap_or_else(|| die("--model is required")));
-    let draft = a.get("--draft").map(load);
+    let model = load(
+        a.get("--model").unwrap_or_else(|| die("--model is required")),
+        quant_arg(a, "--quant"),
+    );
+    let draft = a.get("--draft").map(|d| load(d, quant_arg(a, "--draft-quant")));
     let cfg = engine_config(a, &model);
     let pool = match a.get("--threads") {
         Some(n) => Pool::new(n.parse().unwrap_or_else(|_| die("bad --threads"))),
@@ -291,8 +311,76 @@ fn main() {
                 writeln!(file, "{}", s.to_json(&label)).ok();
             }
         }
+        "perplexity" => {
+            // Quality of the (optionally quantized) model on held-out text.
+            let dir = a.get("--model").unwrap_or_else(|| die("--model is required"));
+            let data = a.get("--data").unwrap_or_else(|| die("--data FILE is required"));
+            let quant = quant_arg(&a, "--quant");
+            let ctx = a.num("--ctx", 512usize);
+            let windows = a.num("--windows", 40usize);
+            let tok = Tokenizer::load(Path::new(dir)).unwrap_or_else(|e| die(&format!("tokenizer: {e}")));
+            let text = std::fs::read_to_string(data).unwrap_or_else(|e| die(&format!("{data}: {e}")));
+            let tokens = tok.encode(&text, false);
+            let pool = Pool::with_all_cores();
+            let mut model = load(dir, Quant::Bf16);
+            let t = Instant::now();
+            let mut label = quant.name().to_string();
+            if quant != Quant::Bf16 && a.has("--awq") {
+                let calib_file = a.get("--calib").unwrap_or_else(|| die("--awq needs --calib FILE"));
+                let calib = std::fs::read_to_string(calib_file).unwrap_or_else(|e| die(&format!("{calib_file}: {e}")));
+                let seqs = ferrolm::eval::sample_sequences(&tok.encode(&calib, false), a.num("--calib-seqs", 32), 512);
+                let acts = model.calibrate(&pool, &seqs, a.num("--calib-rows", 256));
+                let choices = model.quantize_awq(quant, &acts);
+                let gain: f64 = choices
+                    .iter()
+                    .map(|c| c.error_plain / c.error_awq.max(1e-30))
+                    .sum::<f64>()
+                    / choices.len().max(1) as f64;
+                eprintln!(
+                    "ferrolm: AWQ on {} projections, mean output-error reduction {:.2}x",
+                    choices.len(),
+                    gain
+                );
+                label.push_str("+awq");
+            } else {
+                model.quantize(quant, None);
+            }
+            let prep = t.elapsed().as_secs_f64();
+            let t = Instant::now();
+            let p = ferrolm::eval::perplexity(&model, &pool, &tokens, ctx, windows);
+            let secs = t.elapsed().as_secs_f64();
+            println!(
+                "{label}: perplexity {:.3} over {} tokens ({} windows of {ctx}); weights {:.0} MB; quantize {:.0} s, eval {:.0} s",
+                p.ppl,
+                p.tokens,
+                p.windows,
+                model.weight_bytes() as f64 / 1e6,
+                prep,
+                secs
+            );
+            if let Some(f) = a.get("--json") {
+                let mut file = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(f)
+                    .unwrap_or_else(|e| die(&format!("{f}: {e}")));
+                writeln!(
+                    file,
+                    r#"{{"model":{},"format":{},"ppl":{:.4},"tokens":{},"weight_mb":{:.1}}}"#,
+                    ferrolm::json::quote(dir),
+                    ferrolm::json::quote(&label),
+                    p.ppl,
+                    p.tokens,
+                    model.weight_bytes() as f64 / 1e6
+                )
+                .ok();
+            }
+        }
         "info" => {
-            let m = load(a.get("--model").unwrap_or_else(|| die("--model is required")));
+            let m = load(
+                a.get("--model").unwrap_or_else(|| die("--model is required")),
+                quant_arg(&a, "--quant"),
+            );
             println!("{:#?}", m.cfg);
             println!("kernels: {}", ferrolm::kernels::backend());
             println!("KV cache per token: {} bytes", m.cfg.kv_bytes_per_token());

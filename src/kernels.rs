@@ -11,12 +11,13 @@
 //! paths agree bit for bit.
 
 use crate::pool::{Out, Pool};
+use crate::quant::{QMatrix, Quant};
 use crate::safetensors::bf16_to_f32;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Output columns per packed panel.
-const PANEL: usize = 32;
+pub(crate) const PANEL: usize = 32;
 
 /// Where column `c` of a panel sits among its 32 packed words. The SIMD
 /// kernels widen bf16 to f32 by interleaving with zeros, which within each
@@ -42,6 +43,9 @@ pub struct Matrix {
     pub rows: usize,
     pub cols: usize,
     packed: Vec<u16>,
+    /// The same weights quantized, if the model was loaded that way; then
+    /// `packed` is empty.
+    quant: Option<QMatrix>,
 }
 
 impl Matrix {
@@ -56,10 +60,68 @@ impl Matrix {
                 packed[(p * cols + k) * PANEL + c] = w;
             }
         }
-        Matrix { rows, cols, packed }
+        Matrix {
+            rows,
+            cols,
+            packed,
+            quant: None,
+        }
+    }
+
+    /// From row-major f32 weights, rounded to bf16.
+    pub fn from_f32(rows: usize, cols: usize, w: &[f32]) -> Matrix {
+        Matrix::new(
+            rows,
+            cols,
+            w.iter().map(|&v| crate::safetensors::f32_to_bf16(v)).collect(),
+        )
+    }
+
+    pub fn from_quantized(q: QMatrix) -> Matrix {
+        Matrix {
+            rows: q.rows,
+            cols: q.cols,
+            packed: Vec::new(),
+            quant: Some(q),
+        }
+    }
+
+    /// This matrix with its weights quantized (`importance` weights the
+    /// rounding error per input position; see `QMatrix::quantize`).
+    pub fn quantized(&self, kind: Quant, importance: Option<&[f32]>) -> Matrix {
+        if kind == Quant::Bf16 || self.quant.is_some() {
+            return self.clone();
+        }
+        let mut w = vec![0f32; self.rows * self.cols];
+        for (r, row) in w.chunks_exact_mut(self.cols).enumerate() {
+            self.row_f32(r, row);
+        }
+        let q = QMatrix::quantize(kind, self.rows, self.cols, &w, importance);
+        Matrix {
+            rows: self.rows,
+            cols: self.cols,
+            packed: Vec::new(),
+            quant: Some(q),
+        }
+    }
+
+    /// Row-major f32 copy of the weights (dequantized if quantized).
+    pub fn to_f32(&self) -> Vec<f32> {
+        let mut w = vec![0f32; self.rows * self.cols];
+        for (r, row) in w.chunks_exact_mut(self.cols).enumerate() {
+            self.row_f32(r, row);
+        }
+        w
+    }
+
+    pub fn quant(&self) -> Quant {
+        self.quant.as_ref().map_or(Quant::Bf16, |q| q.kind)
     }
 
     pub fn row_f32(&self, r: usize, out: &mut [f32]) {
+        if let Some(q) = &self.quant {
+            return q.row_f32(r, out);
+        }
         let (p, c) = (r / PANEL, SLOT[r % PANEL]);
         let panel = &self.packed[p * self.cols * PANEL..(p + 1) * self.cols * PANEL];
         for (k, o) in out.iter_mut().enumerate().take(self.cols) {
@@ -68,7 +130,7 @@ impl Matrix {
     }
 
     pub fn bytes(&self) -> usize {
-        self.packed.len() * 2
+        self.quant.as_ref().map_or(self.packed.len() * 2, QMatrix::bytes)
     }
 }
 
@@ -81,13 +143,13 @@ pub fn force_portable(on: bool) {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Isa {
+pub(crate) enum Isa {
     Portable,
     Avx2,
     Avx512,
 }
 
-fn isa() -> Isa {
+pub(crate) fn isa() -> Isa {
     static ISA: OnceLock<Isa> = OnceLock::new();
     if PORTABLE.load(Ordering::Relaxed) {
         return Isa::Portable;
@@ -178,7 +240,11 @@ pub fn matmul(pool: &Pool, x: &[f32], m: usize, w: &Matrix, bias: Option<&[f32]>
     let out = Out::new(y);
     pool.run(panels.div_ceil(per_task), &|t| {
         let p0 = t * per_task;
-        panels_of(x, m, w, p0, (p0 + per_task).min(panels), out);
+        let p1 = (p0 + per_task).min(panels);
+        match &w.quant {
+            Some(q) => crate::quant::panels_of(x, m, q, p0, p1, out),
+            None => panels_of(x, m, w, p0, p1, out),
+        }
     });
     if let Some(b) = bias {
         for row in y.chunks_exact_mut(n) {
@@ -191,7 +257,7 @@ pub fn matmul(pool: &Pool, x: &[f32], m: usize, w: &Matrix, bias: Option<&[f32]>
 
 /// Tile shapes (rows, panels) by the rows left in a block: as many
 /// independent accumulator chains as the registers hold.
-fn tile_shape(rows: usize) -> (usize, usize) {
+pub(crate) fn tile_shape(rows: usize) -> (usize, usize) {
     match (isa(), rows) {
         (Isa::Avx512, 1) => (1, 4),
         (Isa::Avx512, 2 | 3) => (2, 2),

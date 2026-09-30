@@ -13,34 +13,61 @@ use crate::config::{Config, RopeScaling};
 use crate::kernels::{self, Matrix};
 use crate::kv::KvCache;
 use crate::pool::{Out, Pool};
+use crate::quant::Quant;
 use crate::rng::Rng;
 use crate::safetensors::{Checkpoint, f32_to_bf16};
 use std::cell::RefCell;
 use std::path::Path;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 thread_local! {
     static SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
 }
 
 pub struct Layer {
-    attn_norm: Vec<f32>,
+    pub(crate) attn_norm: Vec<f32>,
     /// q, k and v projections stacked.
-    wqkv: Matrix,
-    bqkv: Option<Vec<f32>>,
-    wo: Matrix,
-    mlp_norm: Vec<f32>,
+    pub(crate) wqkv: Matrix,
+    pub(crate) bqkv: Option<Vec<f32>>,
+    pub(crate) wo: Matrix,
+    pub(crate) mlp_norm: Vec<f32>,
     /// gate and up projections stacked.
-    w_gate_up: Matrix,
-    w_down: Matrix,
+    pub(crate) w_gate_up: Matrix,
+    pub(crate) w_down: Matrix,
 }
 
 pub struct Model {
     pub cfg: Config,
-    embed: Matrix,
-    layers: Vec<Layer>,
-    norm: Vec<f32>,
-    lm_head: Option<Matrix>,
+    pub(crate) embed: Matrix,
+    pub(crate) layers: Vec<Layer>,
+    pub(crate) norm: Vec<f32>,
+    pub(crate) lm_head: Option<Matrix>,
     inv_freq: Vec<f32>,
+    /// Records the inputs of each layer's projections (for calibrating
+    /// quantization); off unless `capture` is set.
+    pub(crate) capture: Mutex<Option<Capture>>,
+    pub(crate) capturing: AtomicBool,
+}
+
+/// Inputs seen by each layer's four projections: qkv, output, gate/up and
+/// down, in that order.
+#[derive(Default)]
+pub struct Capture {
+    pub layers: Vec<[Vec<Vec<f32>>; 4]>,
+    seen: Vec<[u64; 4]>,
+    pub max_rows: usize,
+    rng: u64,
+}
+
+impl Capture {
+    pub fn new(max_rows: usize) -> Capture {
+        Capture {
+            max_rows,
+            rng: 0x9E37_79B9_7F4A_7C15,
+            ..Capture::default()
+        }
+    }
 }
 
 /// Which logits a chunk needs.
@@ -118,6 +145,8 @@ impl Model {
             layers,
             lm_head,
             cfg,
+            capture: Mutex::new(None),
+            capturing: AtomicBool::new(false),
         };
         m.check_shapes()?;
         Ok(m)
@@ -155,7 +184,52 @@ impl Model {
             layers,
             lm_head,
             cfg,
+            capture: Mutex::new(None),
+            capturing: AtomicBool::new(false),
         }
+    }
+
+    /// Quantizes the transformer's linear layers (the embedding and output
+    /// head stay bf16). `importance`, per layer, weights rounding error by
+    /// each input channel's typical activation size, for the qkv, output,
+    /// gate/up and down projections in that order.
+    pub fn quantize(&mut self, kind: Quant, importance: Option<&[[Vec<f32>; 4]]>) {
+        let pool = Pool::with_all_cores();
+        let layers = std::mem::take(&mut self.layers);
+        let mut done: Vec<Option<Layer>> = (0..layers.len()).map(|_| None).collect();
+        let out = Out::new(&mut done);
+        let layers_ref = &layers;
+        pool.run(layers.len(), &|i| {
+            let l = &layers_ref[i];
+            let imp = importance.map(|v| &v[i]);
+            let q = Layer {
+                attn_norm: l.attn_norm.clone(),
+                wqkv: l.wqkv.quantized(kind, imp.map(|v| v[0].as_slice())),
+                bqkv: l.bqkv.clone(),
+                wo: l.wo.quantized(kind, imp.map(|v| v[1].as_slice())),
+                mlp_norm: l.mlp_norm.clone(),
+                w_gate_up: l.w_gate_up.quantized(kind, imp.map(|v| v[2].as_slice())),
+                w_down: l.w_down.quantized(kind, imp.map(|v| v[3].as_slice())),
+            };
+            // SAFETY: each task writes its own slot.
+            unsafe { out.write(i, Some(q)) };
+        });
+        drop(layers);
+        self.layers = done.into_iter().map(Option::unwrap).collect();
+    }
+
+    /// Bytes of weights held in memory.
+    pub fn weight_bytes(&self) -> usize {
+        let per: usize = self
+            .layers
+            .iter()
+            .map(|l| l.wqkv.bytes() + l.wo.bytes() + l.w_gate_up.bytes() + l.w_down.bytes())
+            .sum();
+        per + self.embed.bytes() + self.lm_head.as_ref().map_or(0, Matrix::bytes)
+    }
+
+    pub fn quant(&self) -> Quant {
+        self.layers.first().map_or(Quant::Bf16, |l| l.wqkv.quant())
     }
 
     /// The model cut to its first `n` layers: a cheap, related draft model
@@ -235,6 +309,7 @@ impl Model {
             par_rows(pool, t, &x, &mut xn, |a, b| {
                 kernels::rms_norm(a, &l.attn_norm, c.rms_eps, b)
             });
+            self.record(li, 0, &xn, h);
             kernels::matmul(pool, &xn, t, &l.wqkv, l.bqkv.as_deref(), &mut qkv);
             for r in 0..t {
                 let row = &mut qkv[r * qkv_dim..(r + 1) * qkv_dim];
@@ -245,14 +320,17 @@ impl Model {
                 cache.write(li, slot[r], &row[q_dim..q_dim + nkv * hd], &row[q_dim + nkv * hd..]);
             }
             self.attention(pool, cache, li, chunks, &pos, &owner, &qkv, &mut att);
+            self.record(li, 1, &att, q_dim);
             kernels::matmul(pool, &att, t, &l.wo, None, &mut proj);
             kernels::add(&mut x, &proj);
             par_rows(pool, t, &x, &mut xn, |a, b| {
                 kernels::rms_norm(a, &l.mlp_norm, c.rms_eps, b)
             });
+            self.record(li, 2, &xn, h);
             kernels::matmul(pool, &xn, t, &l.w_gate_up, None, &mut gate_up);
             let inter = c.intermediate;
             par_rows(pool, t, &gate_up, &mut act, |a, b| kernels::silu_mul(a, inter, b));
+            self.record(li, 3, &act, inter);
             kernels::matmul(pool, &act, t, &l.w_down, None, &mut proj);
             kernels::add(&mut x, &proj);
         }
@@ -281,6 +359,36 @@ impl Model {
         let mut logits = vec![0f32; rows.len() * c.vocab];
         kernels::matmul(pool, &hsel, rows.len(), self.lm_head(), None, &mut logits);
         logits
+    }
+
+    /// Keeps up to `max_rows` input rows per projection while capturing.
+    fn record(&self, layer: usize, which: usize, x: &[f32], width: usize) {
+        if !self.capturing.load(Ordering::Relaxed) {
+            return;
+        }
+        let mut g = self.capture.lock().unwrap();
+        let Some(cap) = g.as_mut() else { return };
+        if cap.layers.len() <= layer {
+            cap.layers.resize_with(layer + 1, Default::default);
+            cap.seen.resize(layer + 1, [0; 4]);
+        }
+        // Reservoir sampling: a uniform sample of every row seen.
+        let max = cap.max_rows;
+        for r in x.chunks_exact(width) {
+            let n = cap.seen[layer][which];
+            cap.seen[layer][which] += 1;
+            if (n as usize) < max {
+                cap.layers[layer][which].push(r.to_vec());
+            } else {
+                cap.rng ^= cap.rng << 13;
+                cap.rng ^= cap.rng >> 7;
+                cap.rng ^= cap.rng << 17;
+                let j = cap.rng % (n + 1);
+                if (j as usize) < max {
+                    cap.layers[layer][which][j as usize] = r.to_vec();
+                }
+            }
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
