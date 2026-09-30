@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="400" viewBox="0 0 720 400" font-family="system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif" role="img" aria-label="Time to first token under load (90th percentile)">
+<rect width="720" height="400" rx="8" fill="#fcfcfb"/>
+<text x="24" y="34" font-size="17" font-weight="600" fill="#0b0b0b">Time to first token under load (90th percentile)</text>
+<text x="24" y="56" font-size="13" fill="#52514e">Poisson arrivals, 48 requests per point; continuous vs static batching, 32 sequences max</text>
+<line x1="24" y1="74" x2="42" y2="74" stroke="#2a78d6" stroke-width="2" stroke-linecap="round"/>
+<circle cx="33" cy="74" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"/>
+<text x="50" y="78" font-size="13" fill="#0b0b0b">Continuous batching</text>
+<line x1="206.5" y1="74" x2="224.5" y2="74" stroke="#eb6834" stroke-width="2" stroke-linecap="round"/>
+<circle cx="215.5" cy="74" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"/>
+<text x="232.5" y="78" font-size="13" fill="#0b0b0b">Static batching</text>
+<line x1="64" y1="344.0" x2="650" y2="344.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="348.0" font-size="12" fill="#52514e" text-anchor="end">0.5</text>
+<line x1="64" y1="311.6" x2="650" y2="311.6" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="315.6" font-size="12" fill="#52514e" text-anchor="end">1</text>
+<line x1="64" y1="203.8" x2="650" y2="203.8" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="207.8" font-size="12" fill="#52514e" text-anchor="end">10</text>
+<line x1="64" y1="96.0" x2="650" y2="96.0" stroke="#e4e3df" stroke-width="1"/>
+<text x="56" y="100.0" font-size="12" fill="#52514e" text-anchor="end">100</text>
+<text x="64.0" y="364" font-size="12" fill="#52514e" text-anchor="middle">0.5</text>
+<text x="147.7" y="364" font-size="12" fill="#52514e" text-anchor="middle">1</text>
+<text x="315.1" y="364" font-size="12" fill="#52514e" text-anchor="middle">2</text>
+<text x="482.6" y="364" font-size="12" fill="#52514e" text-anchor="middle">3</text>
+<text x="650.0" y="364" font-size="12" fill="#52514e" text-anchor="middle">4</text>
+<text x="357.0" y="386" font-size="12" fill="#52514e" text-anchor="middle">arrival rate (requests per second)</text>
+<text x="16" y="220.0" font-size="12" fill="#52514e" text-anchor="middle" transform="rotate(-90 16 220.0)">seconds</text>
+<polyline points="64.0,317.2 147.7,291.4 315.1,174.7 482.6,162.6 650.0,159.1" fill="none" stroke="#2a78d6" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="64.0" cy="317.2" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Continuous batching at 0.5: 0.887 seconds</title></circle>
+<circle cx="147.7" cy="291.4" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Continuous batching at 1: 1.54 seconds</title></circle>
+<circle cx="315.1" cy="174.7" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Continuous batching at 2: 18.6 seconds</title></circle>
+<circle cx="482.6" cy="162.6" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Continuous batching at 3: 24.1 seconds</title></circle>
+<circle cx="650.0" cy="159.1" r="4" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>Continuous batching at 4: 26 seconds</title></circle>
+<polyline points="64.0,182.5 147.7,154.6 315.1,148.3 482.6,133.8 650.0,131.4" fill="none" stroke="#eb6834" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+<circle cx="64.0" cy="182.5" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Static batching at 0.5: 15.8 seconds</title></circle>
+<circle cx="147.7" cy="154.6" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Static batching at 1: 28.6 seconds</title></circle>
+<circle cx="315.1" cy="148.3" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Static batching at 2: 32.7 seconds</title></circle>
+<circle cx="482.6" cy="133.8" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Static batching at 3: 44.6 seconds</title></circle>
+<circle cx="650.0" cy="131.4" r="4" fill="#eb6834" stroke="#fcfcfb" stroke-width="2"><title>Static batching at 4: 46.9 seconds</title></circle>
+<text x="660" y="135.4" font-size="13" font-weight="600" fill="#0b0b0b">46.9<tspan font-weight="400" fill="#52514e"> s</tspan></text>
+<text x="660" y="163.1" font-size="13" font-weight="600" fill="#0b0b0b">26<tspan font-weight="400" fill="#52514e"> s</tspan></text>
+</svg>
