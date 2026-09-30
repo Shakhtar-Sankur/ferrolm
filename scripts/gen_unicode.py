@@ -173,7 +173,7 @@ fn decompose(c: u32, out: &mut Vec<u32>) {{
         let s = c - S_BASE;
         out.push(L_BASE + s / N_COUNT);
         out.push(V_BASE + (s % N_COUNT) / T_COUNT);
-        if s % T_COUNT != 0 {{
+        if !s.is_multiple_of(T_COUNT) {{
             out.push(T_BASE + s % T_COUNT);
         }}
         return;
@@ -194,7 +194,7 @@ fn compose(a: u32, b: u32) -> Option<u32> {{
     if (L_BASE..L_BASE + 19).contains(&a) && (V_BASE..V_BASE + 21).contains(&b) {{
         return Some(S_BASE + ((a - L_BASE) * 21 + (b - V_BASE)) * T_COUNT);
     }}
-    if (S_BASE..S_BASE + S_COUNT).contains(&a) && (a - S_BASE) % T_COUNT == 0 && (T_BASE + 1..T_BASE + T_COUNT).contains(&b) {{
+    if (S_BASE..S_BASE + S_COUNT).contains(&a) && (a - S_BASE).is_multiple_of(T_COUNT) && (T_BASE + 1..T_BASE + T_COUNT).contains(&b) {{
         return Some(a + (b - T_BASE));
     }}
     COMP.binary_search_by(|e| (e.0, e.1).cmp(&(a, b))).ok().map(|i| COMP[i].2)

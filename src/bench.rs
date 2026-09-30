@@ -19,6 +19,11 @@ pub struct Workload {
     pub shared_prefix: usize,
     pub seed: u64,
     pub temperature: f32,
+    /// Real prompts, used in turn instead of random tokens; replies then
+    /// end at the model's end-of-turn token or `gen_len`.
+    pub prompts: Vec<Vec<u32>>,
+    /// Tokens that end a reply (the chat template's end-of-turn).
+    pub stop_ids: Vec<u32>,
 }
 
 #[derive(Clone, Debug)]
@@ -68,13 +73,17 @@ pub fn run(mut engine: Engine, handle: Handle, w: &Workload) -> Summary {
     let prefix: Vec<u32> = (0..w.shared_prefix).map(|_| tok(&mut rng)).collect();
     let mut t = 0.0;
     let plan: Vec<(f64, Vec<u32>, usize)> = (0..w.requests)
-        .map(|_| {
+        .map(|i| {
             if let Some(r) = w.rate {
                 t += rng.exponential(1.0 / r);
             }
             let n = rng.between(w.prompt_len.0 as u64, w.prompt_len.1 as u64) as usize;
             let mut p = prefix.clone();
-            p.extend((0..n).map(|_| tok(&mut rng)));
+            if w.prompts.is_empty() {
+                p.extend((0..n).map(|_| tok(&mut rng)));
+            } else {
+                p.extend_from_slice(&w.prompts[i % w.prompts.len()]);
+            }
             let g = rng.between(w.gen_len.0 as u64, w.gen_len.1 as u64) as usize;
             (t, p, g)
         })
@@ -92,7 +101,12 @@ pub fn run(mut engine: Engine, handle: Handle, w: &Workload) -> Summary {
                 temperature: w.temperature,
                 seed: w.seed.wrapping_add(i as u64 + 1),
                 max_tokens: gen_len,
-                ignore_eos: true,
+                ignore_eos: w.prompts.is_empty(),
+                stop_ids: if w.prompts.is_empty() {
+                    Vec::new()
+                } else {
+                    w.stop_ids.clone()
+                },
                 ..Default::default()
             };
             let arrival = start.elapsed().as_secs_f64();

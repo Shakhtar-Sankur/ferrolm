@@ -1,0 +1,24 @@
+Explain how a hash table works and when its operations become slow.
+Write a Python function that checks whether a string is a palindrome, with a short explanation.
+Summarize the causes of the French Revolution in a few sentences.
+What are the differences between TCP and UDP? Give an example use for each.
+Describe the water cycle to a ten-year-old.
+Write a haiku about autumn leaves, then explain its imagery.
+How does a binary search work? Walk through an example on a sorted list.
+Give five tips for writing clear technical documentation.
+Explain what photosynthesis is and why it matters for life on Earth.
+Write a short story opening about a lighthouse keeper who finds a message in a bottle.
+What is the difference between a process and a thread in an operating system?
+List the planets of the solar system in order and one fact about each.
+Explain recursion using the example of computing a factorial.
+What are the main benefits of regular exercise? Answer in a short paragraph.
+Describe how a bill becomes a law in a parliamentary democracy.
+Write a SQL query that finds the ten customers with the highest total order value, and explain it.
+Explain the difference between weather and climate.
+What is a neural network? Explain it without using any math.
+Give a recipe for a simple vegetable soup with step-by-step instructions.
+Explain why the sky is blue.
+Compare renewable and non-renewable energy sources.
+What does the Big O notation O(n log n) mean? Give an algorithm with that complexity.
+Write a polite email declining a meeting invitation because of a scheduling conflict.
+Explain how vaccines train the immune system.

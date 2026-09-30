@@ -173,7 +173,7 @@ impl Tokenizer {
             }
             added.push(Added { id, content });
         }
-        added.sort_by(|a, b| b.content.len().cmp(&a.content.len()));
+        added.sort_by_key(|a| std::cmp::Reverse(a.content.len()));
         let pre = match v.get("pre_tokenizer") {
             None | Some(Json::Null) => Vec::new(),
             Some(p) => pre_steps(p)?,

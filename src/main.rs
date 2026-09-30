@@ -19,7 +19,7 @@ USAGE:
                    [--temperature 0] [--top-p 1] [--top-k 0] [--seed 1] [engine options]
   ferrolm bench    --model DIR|random:SHAPE [--draft DIR|random:SHAPE] [--requests 64]
                    [--rate REQ_PER_S] [--prompt-len 64..256] [--gen-len 32..128]
-                   [--shared-prefix 0] [--temperature 0] [--seed 1] [--label NAME]
+                   [--shared-prefix 0] [--prompt-file FILE] [--temperature 0] [--seed 1] [--label NAME]
                    [--json FILE] [engine options]
   ferrolm info     --model DIR|random:SHAPE
 
@@ -263,7 +263,22 @@ fn main() {
                 shared_prefix: a.num("--shared-prefix", 0),
                 seed: a.num("--seed", 1),
                 temperature: a.num("--temperature", 0.0),
+                prompts: Vec::new(),
+                stop_ids: Vec::new(),
             };
+            let mut w = w;
+            if let Some(f) = a.get("--prompt-file") {
+                // One prompt per line, as a user turn in the chat template.
+                let dir = a.get("--model").unwrap();
+                let tok = Tokenizer::load(Path::new(dir)).unwrap_or_else(|e| die(&format!("tokenizer: {e}")));
+                let text = std::fs::read_to_string(f).unwrap_or_else(|e| die(&format!("{f}: {e}")));
+                w.prompts = text
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .map(|l| tok.encode(&tok.chat_prompt(&[("user".into(), l.trim().into())]), true))
+                    .collect();
+                w.stop_ids = tok.stop_ids.clone();
+            }
             let label = a.get("--label").unwrap_or("bench").to_string();
             let s = bench::run(engine, handle, &w);
             s.print(&label);
