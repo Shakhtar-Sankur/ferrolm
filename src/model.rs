@@ -158,6 +158,14 @@ impl Model {
         }
     }
 
+    /// The model cut to its first `n` layers: a cheap, related draft model
+    /// for tests of speculative decoding.
+    pub fn truncated(mut self, n: usize) -> Model {
+        self.layers.truncate(n);
+        self.cfg.layers = self.layers.len();
+        self
+    }
+
     fn check_shapes(&self) -> Result<(), String> {
         let c = &self.cfg;
         let qkv = (c.heads + 2 * c.kv_heads) * c.head_dim;
