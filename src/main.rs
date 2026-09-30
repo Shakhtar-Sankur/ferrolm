@@ -376,6 +376,131 @@ fn main() {
                 .ok();
             }
         }
+        "ann" => {
+            // Vector search on a standard benchmark (e.g. SIFT1M .fvecs).
+            use ferrolm::vector::{
+                Metric,
+                hnsw::{Hnsw, HnswParams},
+                io,
+                ivfpq::{IvfPq, IvfPqParams},
+                recall,
+            };
+            let path =
+                |k: &str| Path::new(a.get(k).unwrap_or_else(|| die(&format!("{k} FILE is required")))).to_path_buf();
+            let n = a
+                .get("--n")
+                .map(|v| v.parse::<usize>().unwrap_or_else(|_| die("bad --n")));
+            let (base, dim) = io::read_fvecs(&path("--base"), n).unwrap_or_else(|e| die(&e));
+            let (queries, qdim) = io::read_fvecs(
+                &path("--query"),
+                a.get("--queries").map(|v| v.parse().unwrap_or(10_000)),
+            )
+            .unwrap_or_else(|e| die(&e));
+            assert_eq!(dim, qdim, "query dimension");
+            let truth = io::read_ivecs(&path("--truth"), Some(queries.len() / dim)).unwrap_or_else(|e| die(&e));
+            let pool = match a.get("--threads") {
+                Some(t) => Pool::new(t.parse().unwrap_or_else(|_| die("bad --threads"))),
+                None => Pool::with_all_cores(),
+            };
+            let one = Pool::new(1);
+            let list = |k: &str, d: &str| -> Vec<usize> {
+                a.get(k)
+                    .unwrap_or(d)
+                    .split(',')
+                    .map(|v| v.parse().unwrap_or_else(|_| die(&format!("bad {k}"))))
+                    .collect()
+            };
+            let nq = queries.len() / dim;
+            let label = a.get("--label").unwrap_or("ferrolm").to_string();
+            let json = a.get("--json").map(String::from);
+            let emit = |index: &str, param: String, r: f64, qps1: f64, qpsn: f64, build: f64| {
+                println!(
+                    "{label} {index} {param}: recall@10 {r:.4}  {qps1:.0} QPS (1 thread)  {qpsn:.0} QPS ({} threads)  build {build:.0} s",
+                    pool.threads()
+                );
+                if let Some(f) = &json {
+                    let mut file = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(f)
+                        .unwrap_or_else(|e| die(&format!("{f}: {e}")));
+                    writeln!(file, r#"{{"engine":{},"index":"{index}","param":"{param}","recall10":{r:.5},"qps_1":{qps1:.1},"qps_n":{qpsn:.1},"threads":{},"build_s":{build:.1},"n":{}}}"#, ferrolm::json::quote(&label), pool.threads(), base.len() / dim).ok();
+                }
+            };
+            // Single-threaded QPS on a subset (it is slow); multi-threaded on all.
+            let sub = nq.min(a.num("--single-thread-queries", 2000usize));
+            type Search<'a> = &'a dyn Fn(&Pool, &[f32]) -> Vec<Vec<ferrolm::vector::Neighbor>>;
+            let timed = |f: Search| -> (f64, f64, f64) {
+                let t = Instant::now();
+                let r = f(&pool, &queries);
+                let qpsn = nq as f64 / t.elapsed().as_secs_f64();
+                let t = Instant::now();
+                f(&one, &queries[..sub * dim]);
+                let qps1 = sub as f64 / t.elapsed().as_secs_f64();
+                (recall(&r, &truth, 10), qps1, qpsn)
+            };
+            match a.get("--index").unwrap_or("hnsw") {
+                "hnsw" => {
+                    let p = HnswParams {
+                        m: a.num("--m", 16),
+                        ef_construction: a.num("--ef-construction", 200),
+                        seed: 1,
+                    };
+                    let t = Instant::now();
+                    let h = Hnsw::build(&pool, Metric::L2, dim, &base, p);
+                    let build = t.elapsed().as_secs_f64();
+                    eprintln!(
+                        "ferrolm: HNSW over {} vectors built in {build:.0} s, mean degree {:.1}",
+                        h.len(),
+                        h.mean_degree()
+                    );
+                    for ef in list("--ef", "16,32,64,128,256") {
+                        let (r, q1, qn) = timed(&|p, q| h.search_batch(p, q, 10, ef));
+                        emit(
+                            "hnsw",
+                            format!("M={} efC={} ef={ef}", p.m, p.ef_construction),
+                            r,
+                            q1,
+                            qn,
+                            build,
+                        );
+                    }
+                }
+                "ivfpq" => {
+                    let (learn, _) = io::read_fvecs(&path("--learn"), None).unwrap_or_else(|e| die(&e));
+                    let p = IvfPqParams {
+                        nlist: a.num("--nlist", 1024),
+                        m: a.num("--pq-m", 16),
+                        iters: a.num("--iters", 20),
+                        keep_vectors: true,
+                        seed: 1,
+                    };
+                    let t = Instant::now();
+                    let mut ix = IvfPq::train(&pool, Metric::L2, dim, &learn, p);
+                    ix.add(&pool, &base);
+                    let build = t.elapsed().as_secs_f64();
+                    eprintln!(
+                        "ferrolm: IVF-PQ over {} vectors built in {build:.0} s, {} bytes per vector",
+                        ix.len(),
+                        ix.bytes_per_vector()
+                    );
+                    for refine in list("--refine", "0,10") {
+                        for nprobe in list("--nprobe", "1,4,16,64") {
+                            let (r, q1, qn) = timed(&|p, q| ix.search_batch(p, q, 10, nprobe, refine));
+                            emit(
+                                "ivfpq",
+                                format!("nlist={} m={} nprobe={nprobe} refine={refine}", p.nlist, p.m),
+                                r,
+                                q1,
+                                qn,
+                                build,
+                            );
+                        }
+                    }
+                }
+                other => die(&format!("unknown index {other:?}")),
+            }
+        }
         "info" => {
             let m = load(
                 a.get("--model").unwrap_or_else(|| die("--model is required")),

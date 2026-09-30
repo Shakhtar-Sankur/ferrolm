@@ -211,6 +211,24 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     hsum8(acc)
 }
 
+/// Squared Euclidean distance (length a multiple of 8), in the same lane
+/// order as `dot`.
+pub fn l2sq(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    #[cfg(target_arch = "x86_64")]
+    if use_avx2() {
+        return unsafe { avx2::l2sq(a, b) };
+    }
+    let mut acc = [0f32; 8];
+    for (ca, cb) in a.as_chunks::<8>().0.iter().zip(b.as_chunks::<8>().0) {
+        for l in 0..8 {
+            let d = ca[l] - cb[l];
+            acc[l] = d.mul_add(d, acc[l]);
+        }
+    }
+    hsum8(acc)
+}
+
 /// `acc += s * v`, elementwise with fused multiply-adds.
 pub fn axpy(acc: &mut [f32], s: f32, v: &[f32]) {
     #[cfg(target_arch = "x86_64")]
@@ -466,6 +484,18 @@ mod avx2 {
         let mut l = [0f32; 8];
         unsafe { _mm256_storeu_ps(l.as_mut_ptr(), v) };
         super::hsum8(l)
+    }
+
+    #[target_feature(enable = "avx2,fma")]
+    pub unsafe fn l2sq(a: &[f32], b: &[f32]) -> f32 {
+        let mut acc = _mm256_setzero_ps();
+        for i in (0..a.len()).step_by(8) {
+            unsafe {
+                let d = _mm256_sub_ps(_mm256_loadu_ps(a.as_ptr().add(i)), _mm256_loadu_ps(b.as_ptr().add(i)));
+                acc = _mm256_fmadd_ps(d, d, acc);
+            }
+        }
+        unsafe { hsum(acc) }
     }
 
     #[target_feature(enable = "avx2,fma")]

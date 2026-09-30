@@ -78,7 +78,9 @@ impl Checkpoint {
                     Some("F32") => DType::F32,
                     Some("F16") => DType::F16,
                     Some("BF16") => DType::BF16,
-                    other => return Err(format!("{name}: unsupported dtype {other:?}")),
+                    // Integer buffers (e.g. BERT's position_ids) are not
+                    // weights; skip them.
+                    _ => continue,
                 };
                 let shape: Vec<usize> = t
                     .get("shape")

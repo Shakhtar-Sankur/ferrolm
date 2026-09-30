@@ -3,6 +3,7 @@
 pub mod awq;
 pub mod bench;
 pub mod config;
+pub mod encoder;
 pub mod engine;
 pub mod eval;
 pub mod json;
@@ -17,3 +18,5 @@ pub mod sampler;
 pub mod server;
 pub mod tokenizer;
 pub mod unicode;
+pub mod vector;
+pub mod wordpiece;

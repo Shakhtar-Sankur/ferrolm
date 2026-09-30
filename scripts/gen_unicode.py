@@ -53,6 +53,54 @@ def hf_differences():
 HF_MARKS, HF_DECOMPS = hf_differences()
 
 
+def bert_sets():
+    """Characters Hugging Face's BertNormalizer drops (control characters),
+    maps to a space, strips as accents after NFD, and that BertPreTokenizer
+    isolates as punctuation, probed from the library itself so ferrolm's
+    WordPiece tokenizer agrees with it exactly. Falls back to Unicode
+    categories without `tokenizers`."""
+    try:
+        from tokenizers import normalizers, pre_tokenizers
+    except ImportError:
+        cat = unicodedata.category
+        return (lambda c: cat(c)[0] == "C", lambda c: c.isspace(), lambda c: cat(c) == "Mn", lambda c: cat(c)[0] == "P")
+    clean = normalizers.BertNormalizer(clean_text=True, handle_chinese_chars=False, strip_accents=False, lowercase=False)
+    strip = normalizers.BertNormalizer(clean_text=False, handle_chinese_chars=False, strip_accents=True, lowercase=False)
+    pre = pre_tokenizers.BertPreTokenizer()
+    control, space, mark, punct = set(), set(), set(), set()
+    for cp in range(0x110000):
+        if 0xD800 <= cp <= 0xDFFF:
+            continue
+        ch = chr(cp)
+        out = clean.normalize_str("a" + ch + "b")
+        if out == "ab":
+            control.add(cp)
+        elif out == "a b":
+            space.add(cp)
+        if strip.normalize_str("a" + ch) == "a":
+            mark.add(cp)
+        if len(pre.pre_tokenize_str("a" + ch + "b")) == 3:
+            punct.add(cp)
+    return (lambda c: ord(c) in control, lambda c: ord(c) in space, lambda c: ord(c) in mark, lambda c: ord(c) in punct)
+
+
+BERT_CONTROL, BERT_SPACE, BERT_MARK, BERT_PUNCT = bert_sets()
+
+
+def char_ranges(pred):
+    out, start = [], None
+    for cp in range(0x110000):
+        ok = not (0xD800 <= cp <= 0xDFFF) and pred(chr(cp))
+        if ok and start is None:
+            start = cp
+        if not ok and start is not None:
+            out.append((start, cp - 1))
+            start = None
+    if start is not None:
+        out.append((start, 0x10FFFF))
+    return out
+
+
 def nfc_tables():
     ccc, decomp, comp = [], [], []
     for cp in range(0x110000):
@@ -112,17 +160,37 @@ pub fn is_letter(c: char) -> bool {{
     contains(LETTER, c)
 }}
 
-/// Unicode normalization form C.
-pub fn nfc(s: &str) -> std::borrow::Cow<'_, str> {{
-    // Below U+0300 nothing decomposes or composes.
-    if s.chars().all(|c| (c as u32) < 0x300) {{
-        return std::borrow::Cow::Borrowed(s);
-    }}
+/// Characters BERT's pre-tokenizer isolates as punctuation.
+pub fn bert_punctuation(c: char) -> bool {{
+    contains(BERT_PUNCT, c)
+}}
+
+/// Characters BERT's normalizer drops as control characters.
+pub fn bert_control(c: char) -> bool {{
+    contains(BERT_CONTROL, c)
+}}
+
+/// Characters BERT's normalizer turns into a space.
+pub fn bert_space(c: char) -> bool {{
+    contains(BERT_SPACE, c)
+}}
+
+/// Characters BERT's accent stripping removes (after NFD).
+pub fn bert_mark(c: char) -> bool {{
+    contains(BERT_MARK, c)
+}}
+
+/// Canonical decomposition (NFD), with canonical ordering.
+pub fn nfd(s: &str) -> String {{
     let mut d = Vec::with_capacity(s.len());
     for c in s.chars() {{
         decompose(c as u32, &mut d);
     }}
-    // Canonical ordering: sort each run of non-starters by class, stably.
+    reorder(&mut d);
+    d.into_iter().filter_map(char::from_u32).collect()
+}}
+
+fn reorder(d: &mut [u32]) {{
     let mut i = 0;
     while i < d.len() {{
         if ccc(d[i]) == 0 {{
@@ -135,6 +203,20 @@ pub fn nfc(s: &str) -> std::borrow::Cow<'_, str> {{
         }}
         d[start..i].sort_by_key(|&c| ccc(c));
     }}
+}}
+
+/// Unicode normalization form C.
+pub fn nfc(s: &str) -> std::borrow::Cow<'_, str> {{
+    // Below U+0300 nothing decomposes or composes.
+    if s.chars().all(|c| (c as u32) < 0x300) {{
+        return std::borrow::Cow::Borrowed(s);
+    }}
+    let mut d = Vec::with_capacity(s.len());
+    for c in s.chars() {{
+        decompose(c as u32, &mut d);
+    }}
+    // Canonical ordering: sort each run of non-starters by class, stably.
+    reorder(&mut d);
     let mut out: Vec<u32> = Vec::with_capacity(d.len());
     let mut starter: Option<usize> = None;
     let mut last = 0u8;
@@ -210,5 +292,9 @@ pub fn is_number(c: char) -> bool {{
 
 {table("LETTER", ranges(lambda c: c[0] == "L"))}
 {table("NUMBER", ranges(lambda c: c[0] == "N"))}
+{table("BERT_PUNCT", char_ranges(BERT_PUNCT))}
+{table("BERT_CONTROL", char_ranges(BERT_CONTROL))}
+{table("BERT_SPACE", char_ranges(BERT_SPACE))}
+{table("BERT_MARK", char_ranges(BERT_MARK))}
 {nfc_tables()}"""
 open(sys.argv[1] if len(sys.argv) > 1 else "src/unicode.rs", "w").write(src)
