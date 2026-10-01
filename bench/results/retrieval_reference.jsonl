@@ -1,0 +1,1 @@
+{"label": "transformers reference", "prefix": "Represent this sentence for searching relevant passages: ", "queries": 300, "ndcg10": 0.71271, "recall100": 0.94167, "embed_tokens_per_s": 4862, "threads": 4}

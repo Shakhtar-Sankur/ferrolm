@@ -181,7 +181,7 @@ impl Encoder {
                 r += 1;
             }
         }
-        layer_norm_rows(&mut x, &self.ln_emb.0, &self.ln_emb.1, self.eps);
+        layer_norm_rows(pool, &mut x, &self.ln_emb.0, &self.ln_emb.1, self.eps);
         let mut qkv = vec![0f32; t * 3 * d];
         let mut att = vec![0f32; t * d];
         let mut proj = vec![0f32; t * d];
@@ -191,12 +191,12 @@ impl Encoder {
             self.attention(pool, seqs, &starts, &qkv, &mut att);
             kernels::matmul(pool, &att, t, &l.wo, Some(&l.bo), &mut proj);
             kernels::add(&mut x, &proj);
-            layer_norm_rows(&mut x, &l.ln1.0, &l.ln1.1, self.eps);
+            layer_norm_rows(pool, &mut x, &l.ln1.0, &l.ln1.1, self.eps);
             kernels::matmul(pool, &x, t, &l.w1, Some(&l.b1), &mut h1);
             gelu_rows(pool, &mut h1, self.inter);
             kernels::matmul(pool, &h1, t, &l.w2, Some(&l.b2), &mut proj);
             kernels::add(&mut x, &proj);
-            layer_norm_rows(&mut x, &l.ln2.0, &l.ln2.1, self.eps);
+            layer_norm_rows(pool, &mut x, &l.ln2.0, &l.ln2.1, self.eps);
         }
         seqs.iter()
             .zip(&starts)
@@ -245,47 +245,62 @@ impl Encoder {
             let (i, h, r0) = tasks[t];
             let (st, len) = (starts[i], seqs[i].len());
             let r1 = (r0 + ROWS).min(len);
-            let mut kt = vec![0f32; hd * len];
+            // This head's keys and values, transposed: one row per channel,
+            // zero-padded to a multiple of 8 for the dot product.
+            let lp = len.next_multiple_of(8);
+            let mut kt = vec![0f32; hd * lp];
+            let mut vt = vec![0f32; hd * lp];
             for j in 0..len {
-                let k = &qkv[(st + j) * 3 * d + d + h * hd..][..hd];
-                for (c, &v) in k.iter().enumerate() {
-                    kt[c * len + j] = v;
+                let row = &qkv[(st + j) * 3 * d..][..3 * d];
+                for c in 0..hd {
+                    kt[c * lp + j] = row[d + h * hd + c];
+                    vt[c * lp + j] = row[2 * d + h * hd + c];
                 }
             }
-            let mut s = vec![0f32; len];
+            let mut s = vec![0f32; lp];
             for r in r0..r1 {
                 let q = &qkv[(st + r) * 3 * d + h * hd..][..hd];
-                s.fill(0.0);
+                let sc = &mut s[..len];
+                sc.fill(0.0);
                 for (c, &qc) in q.iter().enumerate() {
-                    kernels::axpy(&mut s, qc * scale, &kt[c * len..(c + 1) * len]);
+                    kernels::axpy(sc, qc * scale, &kt[c * lp..c * lp + len]);
                 }
-                let mx = s.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-                let mut sum = 0f32;
-                for v in &mut s {
-                    *v = (*v - mx).exp();
-                    sum += *v;
+                let mx = sc.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                for v in sc.iter_mut() {
+                    *v -= mx;
                 }
+                kernels::exp_all(sc);
+                let inv = 1.0 / sc.iter().sum::<f32>();
+                // s[len..] stays zero, so the padding adds nothing.
                 // SAFETY: each task writes its own rows of its own head.
                 let o = unsafe { out.slice((st + r) * d + h * hd, hd) };
-                o.fill(0.0);
-                for (j, &p) in s.iter().enumerate() {
-                    kernels::axpy(o, p / sum, &qkv[(st + j) * 3 * d + 2 * d + h * hd..][..hd]);
+                for (c, oc) in o.iter_mut().enumerate() {
+                    *oc = kernels::dot(&s, &vt[c * lp..(c + 1) * lp]) * inv;
                 }
             }
         });
     }
 }
 
-fn layer_norm_rows(x: &mut [f32], g: &[f32], b: &[f32], eps: f32) {
+fn layer_norm_rows(pool: &Pool, x: &mut [f32], g: &[f32], b: &[f32], eps: f32) {
     let d = g.len();
-    for row in x.chunks_exact_mut(d) {
-        let mean = row.iter().map(|&v| f64::from(v)).sum::<f64>() / d as f64;
-        let var = row.iter().map(|&v| (f64::from(v) - mean).powi(2)).sum::<f64>() / d as f64;
-        let inv = 1.0 / (var + f64::from(eps)).sqrt();
-        for ((v, &gg), &bb) in row.iter_mut().zip(g).zip(b) {
-            *v = ((f64::from(*v) - mean) * inv) as f32 * gg + bb;
+    let rows = x.len() / d;
+    let per = rows.div_ceil(pool.threads() * 4).max(1);
+    let out = Out::new(x);
+    pool.run(rows.div_ceil(per), &|task| {
+        let r0 = task * per;
+        let r1 = (r0 + per).min(rows);
+        // SAFETY: each task owns rows r0..r1.
+        let block = unsafe { out.slice(r0 * d, (r1 - r0) * d) };
+        for row in block.chunks_exact_mut(d) {
+            let mean = row.iter().map(|&v| f64::from(v)).sum::<f64>() / d as f64;
+            let var = row.iter().map(|&v| (f64::from(v) - mean).powi(2)).sum::<f64>() / d as f64;
+            let inv = 1.0 / (var + f64::from(eps)).sqrt();
+            for ((v, &gg), &bb) in row.iter_mut().zip(g).zip(b) {
+                *v = ((f64::from(*v) - mean) * inv) as f32 * gg + bb;
+            }
         }
-    }
+    });
 }
 
 /// GELU over rows of width `w`, in parallel.

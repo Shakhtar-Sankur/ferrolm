@@ -1,0 +1,6 @@
+models/smollm2-360m bf16: [37 prompt tokens, 128 generated (Length); first token 0.10 s, then 50.9 tok/s]
+models/smollm2-360m int8: [37 prompt tokens, 128 generated (Length); first token 0.10 s, then 62.5 tok/s]
+models/smollm2-360m int4: [37 prompt tokens, 128 generated (Length); first token 0.11 s, then 91.2 tok/s]
+models/smollm2-1.7b bf16: [37 prompt tokens, 128 generated (Length); first token 0.45 s, then 11.9 tok/s]
+models/smollm2-1.7b int8: [37 prompt tokens, 128 generated (Length); first token 0.48 s, then 16.9 tok/s]
+models/smollm2-1.7b int4: [37 prompt tokens, 128 generated (Length); first token 0.44 s, then 22.1 tok/s]

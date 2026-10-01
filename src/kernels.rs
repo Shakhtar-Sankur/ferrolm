@@ -196,6 +196,7 @@ fn hsum8(l: [f32; 8]) -> f32 {
 
 /// `a · b` over f32 vectors (length a multiple of 8): eight lanes, each
 /// summing every eighth product, then a fixed pairwise sum of the lanes.
+/// Any tail beyond a multiple of 8 is ignored.
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     #[cfg(target_arch = "x86_64")]

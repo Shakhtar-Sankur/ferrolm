@@ -31,7 +31,7 @@ USAGE:
                    [--ctx 512] [--windows 40] [--json FILE]
   ferrolm ann      --index hnsw|ivfpq --base F --query F --truth F [--learn F] [--json FILE]
                    (SIFT1M-format vector search benchmark; see bench/ann.sh)
-  ferrolm retrieval --encoder DIR --beir DIR [--qrels FILE] [--index flat|hnsw] [--ef 128]
+  ferrolm retrieval --encoder DIR --beir DIR [--qrels FILE] [--index flat|hnsw] [--ef 32,64,...]
                    [--query-prefix TEXT] [--max-tokens 0] [--overlap 0] [--json FILE]
   ferrolm qa       --model DIR --encoder DIR --data SQUAD.jsonl [--n 200] [--k 3]
                    [--modes closed,rag,oracle] [--index flat|hnsw] [--query-prefix TEXT]
@@ -593,10 +593,24 @@ fn main() {
             let mut qids: Vec<&String> = qrels.keys().filter(|q| queries.contains_key(*q)).collect();
             qids.sort();
             let enc = Encoder::load(Path::new(enc_dir)).unwrap_or_else(|e| die(&format!("{enc_dir}: {e}")));
-            let kind = index_kind(&a);
+            // HNSW at each --ef (default 32..512), and always exact search.
+            let efs: Vec<usize> = a
+                .get("--ef")
+                .unwrap_or("32,64,128,256,512")
+                .split(',')
+                .map(|v| v.parse().unwrap_or_else(|_| die("bad --ef")))
+                .collect();
+            let kind = match a.get("--index").unwrap_or("hnsw") {
+                "flat" => IndexKind::Flat,
+                _ => IndexKind::Hnsw {
+                    m: a.num("--m", 16),
+                    ef_construction: a.num("--ef-construction", 200),
+                    ef: efs[0],
+                },
+            };
             let prefix = a.get("--query-prefix").unwrap_or("");
             let t = Instant::now();
-            let r = Retriever::build(
+            let mut r = Retriever::build(
                 &pool,
                 enc,
                 &docs,
@@ -618,41 +632,57 @@ fn main() {
             let texts: Vec<&str> = qids.iter().map(|q| queries[*q].as_str()).collect();
             let t = Instant::now();
             let qv = r.embed_queries(&pool, &texts);
-            let hits = r.search_docs(&pool, &qv, 101);
-            let qsec = t.elapsed().as_secs_f64();
-            let (mut n10, mut r100) = (0.0, 0.0);
-            for (q, h) in qids.iter().zip(&hits) {
-                // As BEIR does, never count the query's own id as a hit.
-                let ranked: Vec<&str> = h
-                    .iter()
-                    .map(|&(d, _)| ids[d as usize].as_str())
-                    .filter(|d| d != q)
-                    .collect();
-                n10 += rag::ndcg(&ranked, &qrels[*q], 10);
-                r100 += rag::recall_at(&ranked, &qrels[*q], 100);
+            let embed_ms = 1000.0 * t.elapsed().as_secs_f64() / qids.len() as f64;
+            let label = a.get("--label").unwrap_or("bge-small").to_string();
+            let exact = r.search_docs(&pool, &qv, 101, true);
+            let mut runs: Vec<(String, Option<usize>)> = vec![("exact".into(), None)];
+            if !matches!(kind, IndexKind::Flat) {
+                runs.extend(efs.iter().map(|&ef| (format!("hnsw ef={ef}"), Some(ef))));
             }
-            let nq = qids.len() as f64;
-            let (n10, r100) = (n10 / nq, r100 / nq);
-            let label = a.get("--label").unwrap_or("ferrolm").to_string();
-            println!(
-                "{label}: {} queries, nDCG@10 {n10:.4}, recall@100 {r100:.4}; {:.1} ms per query (embed + search)",
-                qids.len(),
-                1000.0 * qsec / nq
-            );
-            if let Some(f) = a.get("--json") {
-                append_line(
-                    f,
-                    &format!(
-                        r#"{{"label":{},"dataset":{},"queries":{},"ndcg10":{n10:.5},"recall100":{r100:.5},"docs":{},"passages":{},"embed_tokens_per_s":{:.0},"ms_per_query":{:.2}}}"#,
-                        ferrolm::json::quote(&label),
-                        ferrolm::json::quote(&beir.display().to_string()),
-                        qids.len(),
-                        docs.len(),
-                        r.passages.len(),
-                        r.embed_tokens as f64 / r.embed_seconds,
-                        1000.0 * qsec / nq
-                    ),
+            for (name, ef) in runs {
+                let t = Instant::now();
+                let hits = match ef {
+                    None => exact.clone(),
+                    Some(ef) => {
+                        r.set_ef(ef);
+                        r.search_docs(&pool, &qv, 101, false)
+                    }
+                };
+                let search_ms = 1000.0 * t.elapsed().as_secs_f64() / qids.len() as f64;
+                let (mut n10, mut r100, mut agree) = (0.0, 0.0, 0.0);
+                for ((q, h), e) in qids.iter().zip(&hits).zip(&exact) {
+                    // As BEIR does, never count the query's own id as a hit.
+                    let ranked: Vec<&str> = h
+                        .iter()
+                        .map(|&(d, _)| ids[d as usize].as_str())
+                        .filter(|d| d != q)
+                        .collect();
+                    n10 += rag::ndcg(&ranked, &qrels[*q], 10);
+                    r100 += rag::recall_at(&ranked, &qrels[*q], 100);
+                    // Recall@10 of the index against exact search.
+                    let top: Vec<u32> = e.iter().take(10).map(|x| x.0).collect();
+                    agree += h.iter().take(10).filter(|x| top.contains(&x.0)).count() as f64 / top.len().max(1) as f64;
+                }
+                let nq = qids.len() as f64;
+                let (n10, r100, agree) = (n10 / nq, r100 / nq, agree / nq);
+                println!(
+                    "{label} {name}: {} queries, nDCG@10 {n10:.4}, recall@100 {r100:.4}, top-10 overlap with exact {agree:.4}; search {search_ms:.2} ms per query",
+                    qids.len()
                 );
+                if let Some(f) = a.get("--json") {
+                    append_line(
+                        f,
+                        &format!(
+                            r#"{{"label":{},"search":"{name}","dataset":{},"queries":{},"ndcg10":{n10:.5},"recall100":{r100:.5},"overlap10":{agree:.5},"docs":{},"passages":{},"embed_tokens_per_s":{:.0},"query_embed_ms":{embed_ms:.2},"search_ms":{search_ms:.3}}}"#,
+                            ferrolm::json::quote(&label),
+                            ferrolm::json::quote(&beir.display().to_string()),
+                            qids.len(),
+                            docs.len(),
+                            r.passages.len(),
+                            r.embed_tokens as f64 / r.embed_seconds,
+                        ),
+                    );
+                }
             }
         }
         "qa" => {
@@ -727,7 +757,7 @@ fn main() {
                             "oracle" => vec![contexts[gold[i] as usize].as_str()],
                             m => die(&format!("unknown mode {m:?}")),
                         };
-                        tok.chat_prompt(&[("user".into(), rag::prompt(q, &passages))])
+                        tok.chat_prompt(&rag::messages(q, &passages))
                     })
                     .collect();
                 let t = Instant::now();

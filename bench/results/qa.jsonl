@@ -1,0 +1,3 @@
+{"label":"SmolLM2-1.7B + bge-small","mode":"closed","n":200,"k":3,"em":5.00,"f1":15.34,"retrieval_hits":167,"prompt_tokens":96.1,"seconds":88.9}
+{"label":"SmolLM2-1.7B + bge-small","mode":"rag","n":200,"k":3,"em":37.00,"f1":48.19,"retrieval_hits":167,"prompt_tokens":689.8,"seconds":1254.4}
+{"label":"SmolLM2-1.7B + bge-small","mode":"oracle","n":200,"k":3,"em":54.50,"f1":69.99,"retrieval_hits":167,"prompt_tokens":342.4,"seconds":416.6}

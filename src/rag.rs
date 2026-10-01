@@ -32,17 +32,16 @@ pub enum IndexKind {
     },
 }
 
-enum Index {
-    Flat(FlatIndex),
-    Hnsw(Hnsw, usize),
-}
-
 pub struct Retriever {
     pub encoder: Encoder,
     /// Prepended to queries (bge models are trained with an instruction).
     pub query_prefix: String,
     pub passages: Vec<Passage>,
-    index: Index,
+    /// Exact search over all passage vectors, always kept (it is also the
+    /// ground truth when measuring HNSW).
+    flat: FlatIndex,
+    /// An HNSW graph and its search width, when chosen.
+    hnsw: Option<(Hnsw, usize)>,
     /// Seconds spent embedding the passages, and their token count.
     pub embed_seconds: f64,
     pub embed_tokens: usize,
@@ -109,26 +108,25 @@ impl Retriever {
         let embed_seconds = t.elapsed().as_secs_f64();
         let dim = encoder.dim;
         let flat: Vec<f32> = vecs.concat();
-        let index = match kind {
-            IndexKind::Flat => {
-                let mut f = FlatIndex::new(Metric::InnerProduct, dim);
-                f.add(&flat);
-                Index::Flat(f)
-            }
+        let mut exact = FlatIndex::new(Metric::InnerProduct, dim);
+        exact.add(&flat);
+        let hnsw = match kind {
+            IndexKind::Flat => None,
             IndexKind::Hnsw { m, ef_construction, ef } => {
                 let p = HnswParams {
                     m,
                     ef_construction,
                     seed: 1,
                 };
-                Index::Hnsw(Hnsw::build(pool, Metric::InnerProduct, dim, &flat, p), ef)
+                Some((Hnsw::build(pool, Metric::InnerProduct, dim, &flat, p), ef))
             }
         };
         Retriever {
             encoder,
             query_prefix: query_prefix.to_string(),
             passages,
-            index,
+            flat: exact,
+            hnsw,
             embed_seconds,
             embed_tokens: seqs.iter().map(Vec::len).sum(),
         }
@@ -143,11 +141,19 @@ impl Retriever {
             .concat()
     }
 
-    /// The `k` nearest passages to each query vector: (passage, cosine).
-    pub fn search_vectors(&self, pool: &Pool, q: &[f32], k: usize) -> Vec<Vec<(u32, f32)>> {
-        let found: Vec<Vec<Neighbor>> = match &self.index {
-            Index::Flat(f) => f.search_batch(pool, q, k),
-            Index::Hnsw(h, ef) => h.search_batch(pool, q, k, (*ef).max(k)),
+    /// Sets the HNSW search width (no effect on exact search).
+    pub fn set_ef(&mut self, ef: usize) {
+        if let Some((_, e)) = &mut self.hnsw {
+            *e = ef;
+        }
+    }
+
+    /// The `k` nearest passages to each query vector: (passage, cosine),
+    /// from the index, or by exact search.
+    pub fn search_vectors(&self, pool: &Pool, q: &[f32], k: usize, exact: bool) -> Vec<Vec<(u32, f32)>> {
+        let found: Vec<Vec<Neighbor>> = match &self.hnsw {
+            Some((h, ef)) if !exact => h.search_batch(pool, q, k, (*ef).max(k)),
+            _ => self.flat.search_batch(pool, q, k),
         };
         found
             .into_iter()
@@ -158,14 +164,14 @@ impl Retriever {
     /// The `k` nearest passages to each query.
     pub fn search(&self, pool: &Pool, queries: &[&str], k: usize) -> Vec<Vec<(u32, f32)>> {
         let q = self.embed_queries(pool, queries);
-        self.search_vectors(pool, &q, k)
+        self.search_vectors(pool, &q, k, false)
     }
 
     /// The `k` best documents for each query vector, scoring a document by
     /// its best passage.
-    pub fn search_docs(&self, pool: &Pool, q: &[f32], k: usize) -> Vec<Vec<(u32, f32)>> {
+    pub fn search_docs(&self, pool: &Pool, q: &[f32], k: usize, exact: bool) -> Vec<Vec<(u32, f32)>> {
         let per_doc = self.passages.len().div_ceil(self.docs().max(1)).max(1);
-        self.search_vectors(pool, q, k * per_doc.min(8))
+        self.search_vectors(pool, q, k * per_doc.min(8), exact)
             .into_iter()
             .map(|hits| {
                 let mut seen = HashMap::new();
@@ -201,6 +207,25 @@ pub fn prompt(question: &str, passages: &[&str]) -> String {
     }
     s.push_str(&format!("Question: {question}"));
     s
+}
+
+/// Chat messages asking `question`, after one worked example that shows the
+/// expected form of answer (a short span, as in SQuAD). The example is
+/// invented, not drawn from any evaluation set.
+pub fn messages(question: &str, passages: &[&str]) -> Vec<(String, String)> {
+    const DEMO_PASSAGE: &str = "The Eiffel Tower was completed in 1889 as the entrance arch to the World's Fair in Paris. \
+        At 330 metres it was the tallest man-made structure in the world until 1930.";
+    let demo = if passages.is_empty() {
+        prompt("In which city is the Eiffel Tower?", &[])
+    } else {
+        prompt("When was the Eiffel Tower completed?", &[DEMO_PASSAGE])
+    };
+    let answer = if passages.is_empty() { "Paris" } else { "1889" };
+    vec![
+        ("user".into(), demo),
+        ("assistant".into(), answer.into()),
+        ("user".into(), prompt(question, passages)),
+    ]
 }
 
 /// nDCG@k of a ranking against graded relevance judgements, as BEIR

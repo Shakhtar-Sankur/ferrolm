@@ -278,7 +278,7 @@ def main():
             [(names[m], qa[m]["f1"], m == "rag") for m in ("closed", "rag", "oracle") if m in qa],
             "F1",
             fmt="{:.1f}",
-            note=f"SmolLM2-1.7B-Instruct answers; bge-small retrieves the top {n['k']} of every distinct dev paragraph (HNSW).",
+            note=f"SmolLM2-1.7B-Instruct answers; bge-small retrieves the top {n['k']} of all 2,067 distinct dev paragraphs.",
         )
 
 
