@@ -269,34 +269,15 @@ impl Hnsw {
         for layer in (0..=level.min(top)).rev() {
             let found = self.search_layer(&q, &entry, ef, layer, true);
             // As in FAISS: up to 2M links on layer 0, M above.
-            let chosen = self.select(&found, if layer == 0 { self.m0 } else { self.m });
-            {
-                let _g = self.locks[id as usize].lock().unwrap();
-                self.set_neighbors(id, layer, &chosen);
-            }
             let cap = if layer == 0 { self.m0 } else { self.m };
+            let chosen = self.select(&found, cap);
+            // Merge, never overwrite: in a parallel build another node may
+            // already have linked itself here (having reached this node on
+            // a layer above), and dropping that link could leave it with no
+            // way in.
+            self.add_links(id, layer, &chosen, cap);
             for &n in &chosen {
-                let _g = self.locks[n as usize].lock().unwrap();
-                let mut list = Vec::new();
-                self.neighbors(n, layer, false, &mut list);
-                if list.contains(&id) {
-                    continue;
-                }
-                list.push(id);
-                if list.len() > cap {
-                    // Too many: re-choose this node's neighbours.
-                    let base = self.vec(n);
-                    let mut c: Vec<Neighbor> = list
-                        .iter()
-                        .map(|&x| Neighbor {
-                            id: x,
-                            distance: self.metric.distance(base, self.vec(x)),
-                        })
-                        .collect();
-                    c.sort();
-                    list = self.select(&c, cap);
-                }
-                self.set_neighbors(n, layer, &list);
+                self.add_links(n, layer, &[id], cap);
             }
             entry = found;
         }
@@ -306,6 +287,36 @@ impl Hnsw {
                 *e = (id, level);
             }
         }
+    }
+
+    /// Adds `new` to `id`'s neighbours on `layer` under its lock, choosing
+    /// again with the diversity heuristic if that makes more than `cap`.
+    fn add_links(&self, id: u32, layer: usize, new: &[u32], cap: usize) {
+        let _g = self.locks[id as usize].lock().unwrap();
+        let mut list = Vec::new();
+        self.neighbors(id, layer, false, &mut list);
+        let before = list.len();
+        for &x in new {
+            if x != id && !list.contains(&x) {
+                list.push(x);
+            }
+        }
+        if list.len() == before {
+            return;
+        }
+        if list.len() > cap {
+            let base = self.vec(id);
+            let mut c: Vec<Neighbor> = list
+                .iter()
+                .map(|&x| Neighbor {
+                    id: x,
+                    distance: self.metric.distance(base, self.vec(x)),
+                })
+                .collect();
+            c.sort();
+            list = self.select(&c, cap);
+        }
+        self.set_neighbors(id, layer, &list);
     }
 
     /// The `k` nearest to `query`, searching layer 0 with width `ef`.

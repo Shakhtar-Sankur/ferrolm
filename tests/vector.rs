@@ -96,3 +96,30 @@ fn ivfpq_recall_grows_with_probes_and_reranking() {
         ix.search_batch(&pool, &queries, 10, 8, 5)
     );
 }
+
+/// Text embeddings share a common direction (their cosines sit well above
+/// zero). A parallel build on such vectors once lost links when a node
+/// overwrote, rather than merged, back-links added while it was being
+/// inserted, leaving nodes unreachable and recall capped below 1.
+#[test]
+fn parallel_hnsw_build_keeps_the_graph_connected() {
+    let (n, nq, dim) = (5000, 200, 384);
+    let mut rng = Rng::new(7);
+    let common: Vec<f32> = (0..dim).map(|_| rng.normal() as f32 * 3.0).collect();
+    let mut sample = |count: usize| -> Vec<f32> {
+        let mut v: Vec<f32> = data(count, dim, rng.next_u64())
+            .chunks_exact(dim)
+            .flat_map(|x| x.iter().zip(&common).map(|(a, c)| a / 3.0 + c).collect::<Vec<_>>())
+            .collect();
+        normalize(&mut v, dim);
+        v
+    };
+    let base = sample(n);
+    let queries = sample(nq);
+    let pool = Pool::new(4);
+    let t = truth(&pool, Metric::InnerProduct, dim, &base, &queries, 10);
+    let h = Hnsw::build(&pool, Metric::InnerProduct, dim, &base, HnswParams::default());
+    assert!(h.reachable() >= n - 2, "only {} of {n} nodes reachable", h.reachable());
+    let r = recall(&h.search_batch(&pool, &queries, 10, 256), &t, 10);
+    assert!(r >= 0.999, "recall@10 at ef 256: {r}");
+}
